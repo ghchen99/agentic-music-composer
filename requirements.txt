@@ -1,0 +1,32 @@
+# Core dependencies
+fastapi
+uvicorn
+pydantic
+python-dotenv
+
+# Azure OpenAI integration
+openai
+
+# Music processing libraries
+mido       # MIDI file manipulation
+music21    # Music theory and sheet music generation
+numpy      # Numerical operations (required by music21)
+
+# Agent framework
+autogen    # For the intelligent agent system
+
+# File handling
+python-multipart  # For handling file uploads
+
+# Logging and utilities
+logging
+datetime
+
+# Optional: Audio generation (if expanding beyond MIDI)
+# fluidsynth  # For rendering MIDI to audio
+# librosa     # Audio processing
+
+# Development tools
+pytest      # Testing
+black       # Code formatting
+flake8      # Linting
