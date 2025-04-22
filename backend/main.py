@@ -3,9 +3,7 @@ Music Composition Agentic Backend using AutoGen
 
 This system provides:
 1. Music Composition Processing: Generate music based on user parameters
-2. Music Theory Knowledge Base: Query chord progressions and style references
-3. User Preferences Integration: Track and utilize user composition history
-4. Intelligent Agent System: Route requests to specialized musical agents
+2. Intelligent Agent System: Route requests to specialized musical agents
 
 Uses Azure OpenAI for language model capabilities and AutoGen for the agent framework.
 """
@@ -55,24 +53,9 @@ class MusicParameters(BaseModel):
     time_signature: str = "4/4"  # e.g., "3/4", "4/4", etc.
     additional_notes: Optional[str] = None
 
-class MusicTheoryQuery(BaseModel):
-    query: str  # e.g., "common jazz chord progressions"
-    style: Optional[str] = None
-    key: Optional[str] = None
-    context: Optional[Dict[str, Any]] = None
-
-class UserPreferencesQuery(BaseModel):
-    user_id: str
-    query_type: str  # history, favorites, custom_progressions, etc.
-    context: Optional[Dict[str, Any]] = None
-
 class CompositionRequest(BaseModel):
     parameters: MusicParameters
     reference_composition_id: Optional[str] = None
-    context: Optional[Dict[str, Any]] = None
-
-class GenericRequest(BaseModel):
-    query: str
     context: Optional[Dict[str, Any]] = None
 
 class Response(BaseModel):
@@ -358,53 +341,8 @@ class MusicProcessor:
             logger.error(f"Error parsing MIDI file: {str(e)}")
             raise HTTPException(status_code=500, detail=f"MIDI parsing error: {str(e)}")
 
-# Mock music library and style references
-class MusicLibrary:
-    @staticmethod
-    def get_chord_progression(style, key):
-        """Get common chord progressions for a specific style and key"""
-        # Map of common chord progressions by style
-        progressions = {
-            "jazz": {
-                "ii-V-I": "Common jazz progression",
-                "i-VI-ii-V": "Minor jazz progression",
-                "iii-VI-ii-V": "Extended jazz progression"
-            },
-            "rock": {
-                "I-IV-V": "Classic rock progression",
-                "I-V-vi-IV": "Pop rock progression",
-                "i-VII-VI-V": "Minor rock progression"
-            },
-            "pop": {
-                "I-V-vi-IV": "Common pop progression",
-                "vi-IV-I-V": "Pop progression variant",
-                "I-vi-IV-V": "50s progression"
-            },
-            "classical": {
-                "I-IV-V-I": "Classical cadence",
-                "I-vi-IV-V": "Classical period progression",
-                "i-iv-V-i": "Minor classical progression"
-            },
-            "blues": {
-                "I-IV-I-V-IV-I": "12-bar blues",
-                "i-iv-i-v-iv-i": "Minor blues",
-                "I-I7-IV-IV7": "Blues with seventh chords"
-            }
-        }
-        
-        # Get progressions for the requested style
-        style_progressions = progressions.get(style.lower(), progressions["pop"])
-        
-        # Transform progression notation to the requested key (simplified)
-        key_progressions = {}
-        for name, description in style_progressions.items():
-            key_progressions[name] = {
-                "description": description,
-                "progression": f"Progression in {key}: {name}"  # Placeholder for actual key transposition
-            }
-        
-        return key_progressions
-    
+# Basic music reference data for agents
+class MusicReference:
     @staticmethod
     def get_scale(key):
         """Get the notes of a scale for a specific key"""
@@ -416,160 +354,17 @@ class MusicLibrary:
             "E minor": ["E", "F#", "G", "A", "B", "C", "D"],
             "F major": ["F", "G", "A", "Bb", "C", "D", "E"],
             "D minor": ["D", "E", "F", "G", "A", "Bb", "C"],
-            # Add more keys as needed
         }
         
         # Default to C major if key not found
         return scales.get(key, scales["C major"])
-    
-    @staticmethod
-    def get_style_characteristics(style):
-        """Get musical characteristics for a specific style"""
-        characteristics = {
-            "jazz": {
-                "harmony": "Extended chords (7th, 9th, 13th), altered dominants",
-                "rhythm": "Swing feel, syncopation",
-                "typical_instruments": "Piano, bass, drums, saxophone, trumpet",
-                "common_forms": "AABA (32-bar), 12-bar blues"
-            },
-            "rock": {
-                "harmony": "Power chords, pentatonic harmony",
-                "rhythm": "Strong backbeat, 4/4 time signature",
-                "typical_instruments": "Electric guitar, bass, drums, vocals",
-                "common_forms": "Verse-chorus form"
-            },
-            "pop": {
-                "harmony": "Diatonic harmony, simple chord progressions",
-                "rhythm": "Regular 4/4 beats, catchy patterns",
-                "typical_instruments": "Vocals, guitars, keyboards, electronic elements",
-                "common_forms": "Verse-chorus-bridge"
-            },
-            "classical": {
-                "harmony": "Functional harmony, cadences",
-                "rhythm": "Regular meters, rubato in Romantic period",
-                "typical_instruments": "Orchestra, piano, string quartet",
-                "common_forms": "Sonata form, theme and variations"
-            },
-            "blues": {
-                "harmony": "Dominant 7th chords, 12-bar form",
-                "rhythm": "Shuffle rhythm, swing feel",
-                "typical_instruments": "Guitar, harmonica, piano, vocals",
-                "common_forms": "12-bar blues, 8-bar blues"
-            }
-        }
-        
-        return characteristics.get(style.lower(), characteristics["pop"])
-    
-    @staticmethod
-    def get_melody_patterns(style):
-        """Get typical melody patterns for a specific style"""
-        patterns = {
-            "jazz": [
-                "Bebop scale runs",
-                "Approach notes and chromatic passing tones",
-                "Rhythmic variety with syncopation"
-            ],
-            "rock": [
-                "Pentatonic riffs",
-                "Blues-based phrases",
-                "Power chord-derived melodies"
-            ],
-            "pop": [
-                "Stepwise diatonic movement",
-                "Catchy repeated motifs",
-                "Arpeggiated chord tones"
-            ],
-            "classical": [
-                "Motivic development",
-                "Question and answer phrases",
-                "Scalar passages"
-            ],
-            "blues": [
-                "Blues scale riffs",
-                "Bent notes and microtones",
-                "Call and response patterns"
-            ]
-        }
-        
-        return patterns.get(style.lower(), patterns["pop"])
-    
-    @staticmethod
-    def get_drum_patterns(style):
-        """Get typical drum patterns for a specific style"""
-        patterns = {
-            "jazz": [
-                "Ride cymbal pattern with feathered bass drum",
-                "Swing pattern with brushes",
-                "Bebop comping patterns"
-            ],
-            "rock": [
-                "Backbeat with bass drum on 1 and 3, snare on 2 and 4",
-                "Eighth note patterns on hi-hat",
-                "Fill patterns around toms"
-            ],
-            "pop": [
-                "Four-on-the-floor kick pattern",
-                "Programmed electronic patterns",
-                "Layered percussion elements"
-            ],
-            "classical": [
-                "Timpani patterns",
-                "Orchestral percussion accents",
-                "Dramatic cymbal crashes"
-            ],
-            "blues": [
-                "Shuffle pattern",
-                "Half-time feel",
-                "Train beat pattern"
-            ]
-        }
-        
-        return patterns.get(style.lower(), patterns["pop"])
-
-# Mock user preferences system
-class UserPreferencesSystem:
-    @staticmethod
-    def get_user_history(user_id):
-        """Get a user's composition history"""
-        # In production: Connect to a database to retrieve real user history
-        return {
-            "recent_compositions": [
-                {"id": "comp1", "title": "Jazz Experiment 1", "style": "jazz", "key": "C minor", "created_at": "2025-04-10"},
-                {"id": "comp2", "title": "Rock Ballad", "style": "rock", "key": "G major", "created_at": "2025-03-25"}
-            ],
-            "favorite_styles": ["jazz", "blues"],
-            "preferred_keys": ["C minor", "G major"]
-        }
-    
-    @staticmethod
-    def get_user_custom_progressions(user_id):
-        """Get a user's saved custom chord progressions"""
-        # In production: Connect to a database to retrieve real user data
-        return [
-            {"name": "My Jazz Thing", "progression": "ii7-V7-Imaj7-VIm7", "key": "C major"},
-            {"name": "Blues Variant", "progression": "I7-IV7-I7-V7-IV7-I7", "key": "A minor"}
-        ]
-    
-    @staticmethod
-    def get_user_preferences(user_id):
-        """Get a user's general music preferences"""
-        # In production: Connect to a database to retrieve real user preferences
-        return {
-            "preferred_tempo_range": [90, 120],
-            "preferred_complexity": "medium",  # simple, medium, complex
-            "preferred_instruments": ["piano", "guitar", "drums"],
-            "preferred_time_signatures": ["4/4", "3/4"]
-        }
 
 # Tool functions for AutoGen agents
 def generate_chord_progression(style: str, key: str, length: int = 4, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Generate a chord progression based on style and key"""
     try:
-        # Get chord progressions from the music library
-        progressions = MusicLibrary.get_chord_progression(style, key)
-        
         # Get scale notes for the key
-        scale = MusicLibrary.get_scale(key)
+        scale = MusicReference.get_scale(key)
         
         # Prepare system message
         system_message = "You are a music composition assistant specialized in harmony and chord progressions."
@@ -585,8 +380,8 @@ def generate_chord_progression(style: str, key: str, length: int = 4, context: O
             context_str = json.dumps(context)
             messages.append({"role": "user", "content": f"Additional context: {context_str}"})
         
-        # Add information about scales and progressions
-        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}. Common progressions for {style}: {json.dumps(progressions)}"})
+        # Add information about scales
+        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}."})
         
         # Generate chord progression
         chord_progression_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
@@ -624,10 +419,7 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
     """Generate a melody based on chord progression, style, and key"""
     try:
         # Get scale notes for the key
-        scale = MusicLibrary.get_scale(key)
-        
-        # Get typical melody patterns for the style
-        patterns = MusicLibrary.get_melody_patterns(style)
+        scale = MusicReference.get_scale(key)
         
         # Prepare system message
         system_message = "You are a music composition assistant specialized in melody creation."
@@ -643,8 +435,8 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
             context_str = json.dumps(context)
             messages.append({"role": "user", "content": f"Additional context: {context_str}"})
         
-        # Add information about scales and melody patterns
-        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}. Typical {style} melody patterns: {json.dumps(patterns)}"})
+        # Add information about scales
+        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}."})
         
         # Generate melody
         melody_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
@@ -686,9 +478,6 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
 def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Generate drum patterns based on style and time signature"""
     try:
-        # Get typical drum patterns for the style
-        patterns = MusicLibrary.get_drum_patterns(style)
-        
         # Prepare system message
         system_message = "You are a music composition assistant specialized in drum programming."
         
@@ -702,9 +491,6 @@ def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", con
         if context:
             context_str = json.dumps(context)
             messages.append({"role": "user", "content": f"Additional context: {context_str}"})
-        
-        # Add information about drum patterns
-        messages.append({"role": "user", "content": f"Typical {style} drum patterns: {json.dumps(patterns)}"})
         
         # Generate drum pattern
         drums_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
@@ -954,44 +740,6 @@ class MusicCompositionSystem:
         # Register tool functions
         self.function_map = register_autogen_functions()
         
-        # Create the router agent (LLM-based)
-        self.router_agent = AssistantAgent(
-            name="RouterAgent",
-            system_message="""You are a music composition router. Your job is to determine which specialist to route 
-            user queries to based on the content. You have four specialists available:
-            1. ChordSpecialist - For generating chord progressions
-            2. MelodySpecialist - For creating melodies
-            3. DrumSpecialist - For programming drum patterns
-            4. CompositionAssembler - For combining all elements into a complete composition
-            
-            Determine which specialist should handle the query and route it appropriately.
-            """,
-            llm_config={
-                **llm_config,
-                "functions": [
-                    {
-                        "name": "route_to_specialist",
-                        "description": "Route the request to the appropriate specialist",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {
-                                "specialist": {
-                                    "type": "string",
-                                    "description": "The specialist to route to",
-                                    "enum": ["ChordSpecialist", "MelodySpecialist", "DrumSpecialist", "CompositionAssembler"]
-                                },
-                                "reason": {
-                                    "type": "string",
-                                    "description": "Reason for selecting this specialist"
-                                }
-                            },
-                            "required": ["specialist"]
-                        }
-                    }
-                ]
-            }
-        )
-        
         # Create specialist agents with their tools
         self.chord_specialist = AssistantAgent(
             name="ChordSpecialist",
@@ -1043,14 +791,6 @@ class MusicCompositionSystem:
             human_input_mode="NEVER",  # No actual human input needed
             code_execution_config=False  # Disable code execution
         )
-        
-        # Map specialists to their respective functions for direct execution
-        self.specialist_function_map = {
-            "ChordSpecialist": self.function_map["generate_chords"]["function"],
-            "MelodySpecialist": self.function_map["generate_melody"]["function"],
-            "DrumSpecialist": self.function_map["generate_drums"]["function"],
-            "CompositionAssembler": self.function_map["assemble_composition"]["function"]
-        }
     
     async def compose_music(self, parameters: MusicParameters) -> Response:
         """Create a full music composition based on the provided parameters"""
@@ -1156,94 +896,6 @@ class MusicCompositionSystem:
                 source="composition_error",
                 timestamp=datetime.now().isoformat()
             )
-    
-    async def get_music_theory(self, query: str, style: Optional[str] = None, key: Optional[str] = None) -> Response:
-        """Query music theory information"""
-        try:
-            # Prepare context
-            context = {}
-            if style:
-                context["style"] = style
-                # Get style characteristics
-                context["style_characteristics"] = MusicLibrary.get_style_characteristics(style)
-            
-            if key:
-                context["key"] = key
-                # Get scale for the key
-                context["scale"] = MusicLibrary.get_scale(key)
-                
-                if style:
-                    # Get chord progressions for the style and key
-                    context["chord_progressions"] = MusicLibrary.get_chord_progression(style, key)
-            
-            # Prepare system message
-            system_message = "You are a music theory assistant with expertise in different musical styles, harmony, melody, and rhythm. Provide clear and accurate music theory information."
-            
-            # Prepare messages for the LLM
-            messages = [
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": f"Music theory question: {query}"}
-            ]
-            
-            # Add context if available
-            if context:
-                context_str = json.dumps(context)
-                messages.append({"role": "user", "content": f"Additional context: {context_str}"})
-            
-            # Generate response
-            theory_response = ai_client.generate_chat_completion(messages=messages, max_tokens=1000)
-            
-            # Create result
-            result = {
-                "query": query,
-                "answer": theory_response,
-                "context_used": context
-            }
-            
-            return Response(
-                result=result,
-                source="music_theory",
-                timestamp=datetime.now().isoformat()
-            )
-        except Exception as e:
-            logger.error(f"Error in get_music_theory: {str(e)}")
-            return Response(
-                result=f"Error querying music theory: {str(e)}",
-                source="theory_error",
-                timestamp=datetime.now().isoformat()
-            )
-    
-    async def get_user_music_data(self, user_id: str, query_type: str) -> Response:
-        """Get user music preferences and history"""
-        try:
-            result = None
-            
-            if query_type == "history":
-                result = UserPreferencesSystem.get_user_history(user_id)
-            elif query_type == "custom_progressions":
-                result = UserPreferencesSystem.get_user_custom_progressions(user_id)
-            elif query_type == "preferences":
-                result = UserPreferencesSystem.get_user_preferences(user_id)
-            else:
-                # Default to getting all user data
-                result = {
-                    "history": UserPreferencesSystem.get_user_history(user_id),
-                    "custom_progressions": UserPreferencesSystem.get_user_custom_progressions(user_id),
-                    "preferences": UserPreferencesSystem.get_user_preferences(user_id)
-                }
-            
-            return Response(
-                result=result,
-                source="user_music_data",
-                timestamp=datetime.now().isoformat()
-            )
-        except Exception as e:
-            logger.error(f"Error in get_user_music_data: {str(e)}")
-            return Response(
-                result=f"Error retrieving user music data: {str(e)}",
-                source="user_data_error",
-                timestamp=datetime.now().isoformat()
-            )
 
 # Initialize the music composition system
 music_composition_system = MusicCompositionSystem()
@@ -1253,23 +905,6 @@ music_composition_system = MusicCompositionSystem()
 async def compose_music(request: CompositionRequest):
     """Create a new music composition based on parameters"""
     return await music_composition_system.compose_music(request.parameters)
-
-@app.post("/api/theory", response_model=Response)
-async def query_music_theory(request: MusicTheoryQuery):
-    """Query music theory and style information"""
-    return await music_composition_system.get_music_theory(
-        query=request.query,
-        style=request.style,
-        key=request.key
-    )
-
-@app.post("/api/user-data", response_model=Response)
-async def get_user_data(request: UserPreferencesQuery):
-    """Get user music preferences and history"""
-    return await music_composition_system.get_user_music_data(
-        user_id=request.user_id,
-        query_type=request.query_type
-    )
 
 @app.get("/api/composition/{composition_id}/midi")
 async def get_midi_file(composition_id: str):
