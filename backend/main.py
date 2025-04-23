@@ -1,19 +1,31 @@
+"""
+Songwriting Agentic Backend using AutoGen
+
+This system provides:
+1. Song Structure Processing: Determine chord progressions for verse and chorus
+2. Lyrics Generation: Create lyrics based on song description and artist inspirations
+3. Melody Creation: Assign notes and durations to lyric syllables
+4. MIDI Generation: Convert the musical elements into a MIDI file with instruments
+
+Uses Azure OpenAI for language model capabilities and AutoGen for the agent framework.
+"""
+
 import os
 import json
-import tempfile  # Add this import
 from dotenv import load_dotenv
 import openai
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from typing import Dict, Any, Optional, List
 import logging
 from datetime import datetime
-import io
+import music21
 import mido
-from music21 import stream, note, chord, meter, key, clef, metadata
-from music21 import converter as music21_converter
+from mido import Message, MidiFile, MidiTrack
+import tempfile
+import os.path
 from autogen import AssistantAgent, UserProxyAgent
 
 # Setup logging
@@ -24,7 +36,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 # Initialize FastAPI
-app = FastAPI(title="Music Composition Assistant API")
+app = FastAPI(title="Songwriting Assistant API")
 
 # Configure CORS for frontend access
 app.add_middleware(
@@ -36,17 +48,32 @@ app.add_middleware(
 )
 
 # Data models
-class MusicParameters(BaseModel):
-    style: str  # e.g., "jazz", "classical", "rock", "pop", etc.
-    key: str  # e.g., "C major", "A minor", etc.
-    tempo: int = 120  # BPM
-    length: int = 16  # number of measures
-    time_signature: str = "4/4"  # e.g., "3/4", "4/4", etc.
-    additional_notes: Optional[str] = None
+class SongRequest(BaseModel):
+    description: str
+    inspirations: List[str]
+    title: Optional[str] = None
+    tempo: Optional[int] = 120  # Default tempo
 
-class CompositionRequest(BaseModel):
-    parameters: MusicParameters
-    reference_composition_id: Optional[str] = None
+class ChordProgressionRequest(BaseModel):
+    description: str
+    inspirations: List[str]
+    context: Optional[Dict[str, Any]] = None
+
+class LyricsRequest(BaseModel):
+    description: str
+    inspirations: List[str]
+    chords: Dict[str, List[str]]  # e.g., {"verse": ["C", "G", "Am", "F"], "chorus": ["F", "C", "G", "Am"]}
+    context: Optional[Dict[str, Any]] = None
+
+class MelodyRequest(BaseModel):
+    description: str
+    inspirations: List[str]
+    chords: Dict[str, List[str]]
+    lyrics: Dict[str, str]  # e.g., {"verse": "lyrics here", "chorus": "chorus lyrics"}
+    context: Optional[Dict[str, Any]] = None
+
+class GenericRequest(BaseModel):
+    query: str
     context: Optional[Dict[str, Any]] = None
 
 class Response(BaseModel):
@@ -70,30 +97,26 @@ class AzureOpenAIClient:
             "total_tokens": 0
         }
     
-    def generate_chat_completion(self, messages, max_tokens=1000, temperature=0.7, retries=2):
-        """Generate chat completion using Azure OpenAI with retry logic"""
-        for attempt in range(retries + 1):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-                
-                # Track token usage if available
-                if hasattr(response, 'usage'):
-                    self.token_usage["total_prompt_tokens"] += response.usage.prompt_tokens
-                    self.token_usage["total_completion_tokens"] += response.usage.completion_tokens
-                    self.token_usage["total_tokens"] += response.usage.total_tokens
-                
-                return response.choices[0].message.content.strip()
-            except Exception as e:
-                if attempt < retries:
-                    logger.warning(f"Attempt {attempt+1} failed with error: {str(e)}. Retrying...")
-                    continue
-                logger.error(f"Azure OpenAI API error after {retries+1} attempts: {str(e)}")
-                raise HTTPException(status_code=500, detail=f"Azure OpenAI API error: {str(e)}")
+    def generate_chat_completion(self, messages, max_tokens=1000, temperature=0.7):  # Higher temperature for creativity
+        """Generate chat completion using Azure OpenAI"""
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature
+            )
+            
+            # Track token usage if available
+            if hasattr(response, 'usage'):
+                self.token_usage["total_prompt_tokens"] += response.usage.prompt_tokens
+                self.token_usage["total_completion_tokens"] += response.usage.completion_tokens
+                self.token_usage["total_tokens"] += response.usage.total_tokens
+            
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            logger.error(f"Azure OpenAI API error: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Azure OpenAI API error: {str(e)}")
     
     def get_token_usage(self):
         """Return the current token usage statistics"""
@@ -102,366 +125,249 @@ class AzureOpenAIClient:
 # Initialize OpenAI client
 ai_client = AzureOpenAIClient()
 
-# Music processor for different music formats
+# Music21 and MIDI Processor for converting musical elements to MIDI
 class MusicProcessor:
     @staticmethod
-    def create_midi_from_composition(composition_data):
-        """Create a MIDI file from composition data"""
+    def parse_chord(chord_name):
+        """Parse a chord name into a music21 chord object"""
         try:
-            # Extract composition components
-            key_sig = composition_data.get("key", "C major")
-            tempo = composition_data.get("tempo", 120)
-            time_sig = composition_data.get("time_signature", "4/4")
-            chord_progression = composition_data.get("chord_progression", [])
-            melody = composition_data.get("melody", [])
-            drums = composition_data.get("drums", [])
-            
-            # Validate components
-            if not isinstance(chord_progression, list):
-                logger.warning("Invalid chord_progression format, using empty list")
-                chord_progression = []
-            
-            if not isinstance(melody, list):
-                logger.warning("Invalid melody format, using empty list")
-                melody = []
-                
-            if not isinstance(drums, list):
-                logger.warning("Invalid drums format, using empty list")
-                drums = []
-            
-            # Create a new MIDI file
-            mid = mido.MidiFile()
-            
-            # Create tracks for different instruments
-            melody_track = mido.MidiTrack()
-            chord_track = mido.MidiTrack()
-            drum_track = mido.MidiTrack()
-            
-            # Add tracks to the MIDI file
-            mid.tracks.append(melody_track)
-            mid.tracks.append(chord_track)
-            mid.tracks.append(drum_track)
-            
-            # Set tempo
-            tempo_in_microseconds = mido.bpm2tempo(tempo)
-            melody_track.append(mido.MetaMessage('set_tempo', tempo=tempo_in_microseconds))
-            
-            # Set time signature
-            numerator, denominator = map(int, time_sig.split('/'))
-            melody_track.append(mido.MetaMessage('time_signature', numerator=numerator, denominator=denominator))
-            
-            # Process chord progression (simplified example)
-            ticks_per_beat = mid.ticks_per_beat
-            for chord_item in chord_progression:
-                try:
-                    # Create note on messages for chord notes
-                    notes = chord_item.get("notes", [])
-                    if not isinstance(notes, list):
-                        logger.warning(f"Invalid notes format in chord: {chord_item}, skipping")
-                        continue
-                        
-                    for note_value in notes:
-                        chord_track.append(
-                            mido.Message('note_on', note=note_value, velocity=64, time=0)
-                        )
-                    
-                    # Duration calculation (simplified)
-                    duration = chord_item.get("duration", 1.0)
-                    duration_ticks = int(duration * ticks_per_beat)
-                    
-                    # Create note off messages for chord notes
-                    for i, note_value in enumerate(notes):
-                        time_value = duration_ticks if i == 0 else 0  # Only first note has the time value
-                        chord_track.append(
-                            mido.Message('note_off', note=note_value, velocity=64, time=time_value)
-                        )
-                except Exception as e:
-                    logger.warning(f"Error processing chord {chord_item}: {str(e)}")
-                    continue
-            
-            # Process melody (simplified example)
-            for note_item in melody:
-                try:
-                    # Note on
-                    pitch = note_item.get("pitch", 60)
-                    velocity = note_item.get("velocity", 64)
-                    duration = note_item.get("duration", 1.0)
-                    
-                    melody_track.append(
-                        mido.Message('note_on', note=pitch, velocity=velocity, time=0)
-                    )
-                    
-                    # Duration calculation (simplified)
-                    duration_ticks = int(duration * ticks_per_beat)
-                    
-                    # Note off
-                    melody_track.append(
-                        mido.Message('note_off', note=pitch, velocity=0, time=duration_ticks)
-                    )
-                except Exception as e:
-                    logger.warning(f"Error processing melody note {note_item}: {str(e)}")
-                    continue
-            
-            # Process drums (simplified example)
-            for drum_hit in drums:
-                try:
-                    # Note on (drums use channel 9 by convention, 0-indexed)
-                    instrument = drum_hit.get("instrument", 36)
-                    velocity = drum_hit.get("velocity", 64)
-                    
-                    drum_track.append(
-                        mido.Message('note_on', note=instrument, velocity=velocity, 
-                                     channel=9, time=0)
-                    )
-                    
-                    # Short duration for drum hits
-                    drum_track.append(
-                        mido.Message('note_off', note=instrument, velocity=0, 
-                                     channel=9, time=int(0.1 * ticks_per_beat))
-                    )
-                except Exception as e:
-                    logger.warning(f"Error processing drum hit {drum_hit}: {str(e)}")
-                    continue
-            
-            # Save to a BytesIO object
-            midi_file = io.BytesIO()
-            mid.save(file=midi_file)
-            midi_file.seek(0)
-            
-            return midi_file
+            return music21.harmony.ChordSymbol(chord_name)
         except Exception as e:
-            logger.error(f"Error creating MIDI: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"MIDI creation error: {str(e)}")
+            logger.error(f"Error parsing chord {chord_name}: {str(e)}")
+            # Fallback to a simple C major chord
+            return music21.chord.Chord(['C4', 'E4', 'G4'])
     
     @staticmethod
-    def create_sheet_music(composition_data):
-        """Create sheet music from composition data"""
+    def parse_melody_note(note_info):
+        """Parse a note info dict into a music21 note object"""
         try:
-            # Extract composition components
-            key_sig = composition_data.get("key", "C major")
-            tempo = composition_data.get("tempo", 120)
-            time_sig = composition_data.get("time_signature", "4/4")
-            title = composition_data.get("title", "Composition")
-            chord_progression = composition_data.get("chord_progression", [])
-            melody = composition_data.get("melody", [])
+            # Expected format: {'pitch': 'C4', 'duration': 1.0, 'syllable': 'ly'}
+            pitch = note_info.get('pitch', 'C4')
+            duration = note_info.get('duration', 1.0)
             
-            # Validate components
-            if not isinstance(chord_progression, list):
-                logger.warning("Invalid chord_progression format, using empty list")
-                chord_progression = []
-            
-            if not isinstance(melody, list):
-                logger.warning("Invalid melody format, using empty list")
-                melody = []
-            
-            # Create a new music21 score
-            score = stream.Score()
-            
-            # Add metadata
-            score_metadata = metadata.Metadata()
-            score_metadata.title = title
-            score.metadata = score_metadata
-            
-            # Create parts for melody and chords
-            melody_part = stream.Part()
-            chord_part = stream.Part()
-            
-            # Set clef, key signature, time signature for melody
-            melody_part.append(clef.TrebleClef())
-            
-            # Parse key (simplified)
-            key_name = key_sig.split()[0]  # e.g., "C" from "C major"
-            mode = "major" if "major" in key_sig.lower() else "minor"
-            melody_part.append(key.Key(key_name, mode))
-            
-            # Parse time signature
-            ts_parts = time_sig.split('/')
-            melody_part.append(meter.TimeSignature(time_sig))
-            
-            # Set the same for chord part
-            chord_part.append(clef.TrebleClef())
-            chord_part.append(key.Key(key_name, mode))
-            chord_part.append(meter.TimeSignature(time_sig))
-            
-            # Process melody notes
-            for note_item in melody:
-                try:
-                    # Create note
-                    pitch = note_item.get("pitch", 60)
-                    duration = note_item.get("duration", 1.0)
-                    
-                    n = note.Note(pitch)
-                    n.quarterLength = duration
-                    melody_part.append(n)
-                except Exception as e:
-                    logger.warning(f"Error processing melody note {note_item}: {str(e)}")
-                    continue
-            
-            # Process chord progression
-            for chord_item in chord_progression:
-                try:
-                    # Create chord
-                    notes = chord_item.get("notes", [60, 64, 67])  # C major by default
-                    duration = chord_item.get("duration", 1.0)
-                    
-                    c = chord.Chord(notes)
-                    c.quarterLength = duration
-                    chord_part.append(c)
-                except Exception as e:
-                    logger.warning(f"Error processing chord {chord_item}: {str(e)}")
-                    continue
-            
-            # Add parts to score
-            score.append(melody_part)
-            score.append(chord_part)
-            
-            # Save to a BytesIO object as MusicXML - FIXED VERSION
-            musicxml_file = io.BytesIO()
-            
-            # Create a temporary file to write the score
-            with tempfile.NamedTemporaryFile(suffix='.musicxml', delete=True) as temp_file:
-                filename = temp_file.name
-                score.write('musicxml', fp=filename)
-                
-                # Read the written file and write its contents to our BytesIO
-                with open(filename, 'rb') as f:
-                    musicxml_file.write(f.read())
-                    
-            musicxml_file.seek(0)
-            
-            return musicxml_file
+            note = music21.note.Note(pitch)
+            note.duration = music21.duration.Duration(duration)
+            return note
         except Exception as e:
-            logger.error(f"Error creating sheet music: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Sheet music creation error: {str(e)}")
-        
+            logger.error(f"Error parsing note {note_info}: {str(e)}")
+            # Fallback to a quarter note C
+            return music21.note.Note('C4', type='quarter')
+    
     @staticmethod
-    def parse_midi_file(file_content):
-        """Parse a MIDI file and extract musical elements"""
+    def generate_midi_file(chords, melody, title="Song", tempo=120):
+        """Generate a MIDI file with piano, drums, and strings"""
         try:
-            midi_file = io.BytesIO(file_content)
-            mid = mido.MidiFile(file=midi_file)
+            # Create a MIDI file with three tracks: piano (chords), melody, and drums
+            mid = MidiFile(type=1)
             
-            # Extract MIDI data
-            tracks = []
-            for i, track in enumerate(mid.tracks):
-                notes = []
-                current_time = 0
-                open_notes = {}  # Dictionary to track open notes
-                
-                for msg in track:
-                    current_time += msg.time
+            # Track 0: Tempo and time signature
+            track0 = MidiTrack()
+            mid.tracks.append(track0)
+            
+            # Add tempo
+            tempo_microseconds = mido.bpm2tempo(tempo)
+            track0.append(mido.MetaMessage('set_tempo', tempo=tempo_microseconds, time=0))
+            
+            # Add time signature (4/4)
+            track0.append(mido.MetaMessage('time_signature', numerator=4, denominator=4, time=0))
+            
+            # Track 1: Piano (chords)
+            piano_track = MidiTrack()
+            mid.tracks.append(piano_track)
+            piano_track.append(mido.MetaMessage('track_name', name='Piano', time=0))
+            piano_track.append(Message('program_change', program=0, time=0))  # Piano
+            
+            # Add chords
+            time = 0
+            for section, chord_list in chords.items():
+                for chord_name in chord_list:
+                    # Convert chord to music21 object
+                    chord = MusicProcessor.parse_chord(chord_name)
                     
-                    if msg.type == 'note_on' and msg.velocity > 0:
-                        # Note started
-                        open_notes[msg.note] = {
-                            'start_time': current_time,
-                            'velocity': msg.velocity
-                        }
-                    elif (msg.type == 'note_off') or (msg.type == 'note_on' and msg.velocity == 0):
-                        # Note ended
-                        if msg.note in open_notes:
-                            start_data = open_notes[msg.note]
-                            duration = current_time - start_data['start_time']
-                            notes.append({
-                                'pitch': msg.note,
-                                'start_time': start_data['start_time'],
-                                'duration': duration,
-                                'velocity': start_data['velocity']
-                            })
-                            del open_notes[msg.note]
+                    # Add each note in the chord
+                    for note in chord.pitches:
+                        # Convert to MIDI note number
+                        midi_note = note.midi
+                        piano_track.append(Message('note_on', note=midi_note, velocity=64, time=time))
+                        time = 0  # Reset time for subsequent notes in chord
+                    
+                    # Set time for note_off
+                    time = 480  # Quarter note (assuming 480 ticks per quarter note)
+                    
+                    # Add note_off messages
+                    for note in chord.pitches:
+                        midi_note = note.midi
+                        piano_track.append(Message('note_off', note=midi_note, velocity=64, time=time))
+                        time = 0  # Reset time for subsequent notes
+            
+            # Track 2: Melody
+            melody_track = MidiTrack()
+            mid.tracks.append(melody_track)
+            melody_track.append(mido.MetaMessage('track_name', name='Melody', time=0))
+            melody_track.append(Message('program_change', program=73, time=0))  # Flute
+            
+            # Add melody notes
+            time = 0
+            for section, notes in melody.items():
+                for note_info in notes:
+                    # Convert to music21 note
+                    m21_note = MusicProcessor.parse_melody_note(note_info)
+                    
+                    # Convert to MIDI note number
+                    midi_note = m21_note.pitch.midi
+                    
+                    # Calculate duration in ticks (assuming 480 ticks per quarter note)
+                    duration_ticks = int(480 * m21_note.duration.quarterLength)
+                    
+                    # Add note_on
+                    melody_track.append(Message('note_on', note=midi_note, velocity=80, time=time))
+                    time = 0
+                    
+                    # Add note_off
+                    melody_track.append(Message('note_off', note=midi_note, velocity=0, time=duration_ticks))
+                    time = 0
+            
+            # Track 3: Strings (pad)
+            strings_track = MidiTrack()
+            mid.tracks.append(strings_track)
+            strings_track.append(mido.MetaMessage('track_name', name='Strings', time=0))
+            strings_track.append(Message('program_change', program=48, time=0))  # String Ensemble
+            
+            # Add basic string pad following the chord progression
+            time = 0
+            for section, chord_list in chords.items():
+                for chord_name in chord_list:
+                    # Convert chord to music21 object
+                    chord = MusicProcessor.parse_chord(chord_name)
+                    
+                    # Add only root and fifth for a pad sound
+                    notes_to_play = [chord.root().midi, chord.getChordStep(5).midi]
+                    
+                    # Add note_on messages
+                    for midi_note in notes_to_play:
+                        strings_track.append(Message('note_on', note=midi_note, velocity=50, time=time))
+                        time = 0
+                    
+                    # Set time for note_off
+                    time = 960  # Half note
+                    
+                    # Add note_off messages
+                    for midi_note in notes_to_play:
+                        strings_track.append(Message('note_off', note=midi_note, velocity=0, time=time))
+                        time = 0
+            
+            # Track 4: Drums
+            drum_track = MidiTrack()
+            mid.tracks.append(drum_track)
+            drum_track.append(mido.MetaMessage('track_name', name='Drums', time=0))
+            drum_track.append(Message('program_change', program=0, channel=9, time=0))  # Drums channel
+            
+            # Add a basic drum pattern (kick on 1 and 3, snare on 2 and 4, hi-hat on every 8th note)
+            kick_drum = 36
+            snare_drum = 38
+            closed_hihat = 42
+            
+            # Pattern for two measures (8 beats in 4/4 time)
+            for _ in range(2 * (len(chords.get('verse', [])) + len(chords.get('chorus', [])))):  # Repeat for each chord
+                # Beat 1: Kick + Hi-hat
+                drum_track.append(Message('note_on', note=kick_drum, velocity=100, channel=9, time=0))
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=80, channel=9, time=0))
+                drum_track.append(Message('note_off', note=kick_drum, velocity=0, channel=9, time=10))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=110))
                 
-                tracks.append({
-                    'track_number': i,
-                    'name': track.name if hasattr(track, 'name') else f"Track {i}",
-                    'notes': notes
-                })
+                # 8th note: Hi-hat
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=60, channel=9, time=0))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=120))
+                
+                # Beat 2: Snare + Hi-hat
+                drum_track.append(Message('note_on', note=snare_drum, velocity=90, channel=9, time=0))
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=80, channel=9, time=0))
+                drum_track.append(Message('note_off', note=snare_drum, velocity=0, channel=9, time=10))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=110))
+                
+                # 8th note: Hi-hat
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=60, channel=9, time=0))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=120))
+                
+                # Beat 3: Kick + Hi-hat
+                drum_track.append(Message('note_on', note=kick_drum, velocity=100, channel=9, time=0))
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=80, channel=9, time=0))
+                drum_track.append(Message('note_off', note=kick_drum, velocity=0, channel=9, time=10))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=110))
+                
+                # 8th note: Hi-hat
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=60, channel=9, time=0))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=120))
+                
+                # Beat 4: Snare + Hi-hat
+                drum_track.append(Message('note_on', note=snare_drum, velocity=90, channel=9, time=0))
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=80, channel=9, time=0))
+                drum_track.append(Message('note_off', note=snare_drum, velocity=0, channel=9, time=10))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=110))
+                
+                # 8th note: Hi-hat
+                drum_track.append(Message('note_on', note=closed_hihat, velocity=60, channel=9, time=0))
+                drum_track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=120))
             
-            # Extract tempo information (from the first tempo message found)
-            tempo = 120  # Default
-            for track in mid.tracks:
-                for msg in track:
-                    if msg.type == 'set_tempo':
-                        tempo = mido.tempo2bpm(msg.tempo)
-                        break
-                if tempo != 120:
-                    break
+            # Create a song directory structure
+            # Base songs directory
+            songs_dir = os.path.join(os.getcwd(), "songs")
+            if not os.path.exists(songs_dir):
+                os.makedirs(songs_dir)
             
-            # Extract time signature (from the first time_signature message found)
-            time_sig = "4/4"  # Default
-            for track in mid.tracks:
-                for msg in track:
-                    if msg.type == 'time_signature':
-                        time_sig = f"{msg.numerator}/{msg.denominator}"
-                        break
-                if time_sig != "4/4":
-                    break
+            # Clean the title to create a valid folder name
+            safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+            if not safe_title:
+                safe_title = "song"
+                
+            # Create a subfolder for this song
+            song_dir = os.path.join(songs_dir, safe_title.replace(' ', '_'))
+            if not os.path.exists(song_dir):
+                os.makedirs(song_dir)
             
-            return {
-                "tracks": tracks,
+            # Save the MIDI file in the song's directory
+            midi_path = os.path.join(song_dir, f"{safe_title.replace(' ', '_')}.mid")
+            
+            # Save the MIDI file
+            mid.save(midi_path)
+            
+            # Also save a song info JSON file with metadata
+            song_info = {
+                "title": title,
                 "tempo": tempo,
-                "time_signature": time_sig,
-                "ticks_per_beat": mid.ticks_per_beat
+                "creation_date": datetime.now().isoformat(),
+                "chords": chords,
+                "melody_info": {
+                    "verse_notes": len(melody.get("verse", [])),
+                    "chorus_notes": len(melody.get("chorus", []))
+                }
             }
+            
+            with open(os.path.join(song_dir, "song_info.json"), "w") as f:
+                json.dump(song_info, f, indent=2)
+            
+            return midi_path
+        
         except Exception as e:
-            logger.error(f"Error parsing MIDI file: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"MIDI parsing error: {str(e)}")
+            logger.error(f"Error generating MIDI file: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"MIDI generation error: {str(e)}")
 
-# Basic music reference data for agents
-class MusicReference:
-    @staticmethod
-    def get_scale(key):
-        """Get the notes of a scale for a specific key"""
-        # Basic mapping of keys to scales (simplified)
-        scales = {
-            "C major": ["C", "D", "E", "F", "G", "A", "B"],
-            "C minor": ["C", "D", "Eb", "F", "G", "Ab", "Bb"],
-            "G major": ["G", "A", "B", "C", "D", "E", "F#"],
-            "E minor": ["E", "F#", "G", "A", "B", "C", "D"],
-            "F major": ["F", "G", "A", "Bb", "C", "D", "E"],
-            "D minor": ["D", "E", "F", "G", "A", "Bb", "C"],
-            # Add more key signatures as needed
-            "A minor": ["A", "B", "C", "D", "E", "F", "G"],
-            "D major": ["D", "E", "F#", "G", "A", "B", "C#"],
-            "Bb major": ["Bb", "C", "D", "Eb", "F", "G", "A"],
-            "G minor": ["G", "A", "Bb", "C", "D", "Eb", "F"],
-        }
-        
-        # Default to C major if key not found
-        if key not in scales:
-            logger.warning(f"Scale for key '{key}' not found, defaulting to C major")
-        return scales.get(key, scales["C major"])
-
-# Improved tool functions for AutoGen agents
-def generate_chord_progression(style: str, key: str, length: int = 4, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Generate a chord progression based on style and key"""
+# Tool functions for AutoGen agents
+def generate_chord_progression(description: str, inspirations: List[str], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Generate chord progressions for verse and chorus"""
     try:
-        # Get scale notes for the key
-        scale = MusicReference.get_scale(key)
+        # Prepare system message for chord progression generation
+        system_message = """You are a music theory expert specializing in songwriting. 
+        You'll create chord progressions for a verse and chorus based on a song description and musical inspirations.
+        Focus on creating ONE 4-chord progression for the verse and ONE 4-chord progression for the chorus in 4/4 time.
+        Use standard chord notation (e.g., C, G, Am, F).
+        Your response should be in JSON format with 'verse' and 'chorus' keys, each with an array of 4 chords."""
         
-        # Prepare system message
-        system_message = "You are a music composition assistant specialized in harmony and chord progressions."
-        
-        # Prepare messages for the LLM with improved JSON instructions
+        # Prepare messages for the LLM
+        inspirations_str = ", ".join(inspirations)
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": f"""
-Generate a {length}-measure chord progression in {key} for {style} style music.
-
-IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
-Format each chord as:
-{{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}}
-
-Your response must begin with '[' and end with ']' with no other text before or after.
-Example of a valid response format:
-[
-  {{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}},
-  {{"chord_name": "Dm7", "notes": [62, 65, 69, 72], "duration": 1.0}},
-  {{"chord_name": "G7", "notes": [67, 71, 74, 77], "duration": 1.0}},
-  {{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}}
-]
-
-Do not include any explanation, just the JSON array.
-"""}
+            {"role": "user", "content": f"Create chord progressions for a song with this description: {description}\n\nMusical inspirations: {inspirations_str}"}
         ]
         
         # Add context if provided
@@ -469,91 +375,90 @@ Do not include any explanation, just the JSON array.
             context_str = json.dumps(context)
             messages.append({"role": "user", "content": f"Additional context: {context_str}"})
         
-        # Add information about scales
-        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}."})
-        
         # Generate chord progression
-        chord_progression_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        chord_progression_response = ai_client.generate_chat_completion(
+            messages=messages,
+            max_tokens=500,
+            temperature=0.7  # Higher temperature for creative variations
+        )
         
-        # Clean the result to ensure it's valid JSON
-        chord_progression_str = chord_progression_str.strip()
+        # Extract JSON from the response (handling potential text before/after the JSON)
+        import re
+        json_match = re.search(r'({.*?})', chord_progression_response.replace('\n', ''), re.DOTALL)
         
-        # If there's text before the opening bracket, remove it
-        if '[' in chord_progression_str and not chord_progression_str.startswith('['):
-            chord_progression_str = chord_progression_str[chord_progression_str.find('['):]
+        if json_match:
+            chord_progression_json = json_match.group(1)
+            chord_progression = json.loads(chord_progression_json)
+        else:
+            # Fallback to parsing manually if JSON format is not perfect
+            logger.warning("Couldn't parse JSON directly, attempting manual extraction")
             
-        # If there's text after the closing bracket, remove it
-        if ']' in chord_progression_str and not chord_progression_str.endswith(']'):
-            chord_progression_str = chord_progression_str[:chord_progression_str.rfind(']')+1]
+            verse_match = re.search(r'verse"?\s*:\s*\[(.*?)\]', chord_progression_response, re.DOTALL)
+            chorus_match = re.search(r'chorus"?\s*:\s*\[(.*?)\]', chord_progression_response, re.DOTALL)
+            
+            verse_chords = []
+            chorus_chords = []
+            
+            if verse_match:
+                verse_str = verse_match.group(1).strip()
+                verse_chords = [chord.strip().strip('"\'') for chord in verse_str.split(',')]
+            
+            if chorus_match:
+                chorus_str = chorus_match.group(1).strip()
+                chorus_chords = [chord.strip().strip('"\'') for chord in chorus_str.split(',')]
+            
+            chord_progression = {
+                "verse": verse_chords if verse_chords else ["C", "G", "Am", "F"],  # Fallback
+                "chorus": chorus_chords if chorus_chords else ["F", "C", "G", "Am"]  # Fallback
+            }
         
-        # Parse the result
-        try:
-            chord_progression = json.loads(chord_progression_str)
-            if not isinstance(chord_progression, list):
-                raise json.JSONDecodeError("Not a list", chord_progression_str, 0)
-        except json.JSONDecodeError as e:
-            # Fallback in case the LLM doesn't return valid JSON
-            logger.warning(f"LLM didn't return valid JSON for chord progression: {str(e)}, using simplified format")
-            # Create a simple example chord progression
-            chord_progression = [
-                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0},
-                {"chord_name": "Dm7", "notes": [62, 65, 69, 72], "duration": 1.0},
-                {"chord_name": "G7", "notes": [67, 71, 74, 77], "duration": 1.0},
-                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}
-            ]
+        # Ensure there are exactly 4 chords in each section
+        if len(chord_progression.get("verse", [])) != 4:
+            chord_progression["verse"] = chord_progression.get("verse", [])[:4]
+            # Pad if needed
+            while len(chord_progression["verse"]) < 4:
+                chord_progression["verse"].append("C")
+        
+        if len(chord_progression.get("chorus", [])) != 4:
+            chord_progression["chorus"] = chord_progression.get("chorus", [])[:4]
+            # Pad if needed
+            while len(chord_progression["chorus"]) < 4:
+                chord_progression["chorus"].append("F")
         
         return {
-            "chord_progression": chord_progression,
-            "key": key,
-            "style": style,
-            "source": "chord_progression_generator",
+            "chords": chord_progression,
+            "description": description,
+            "inspirations": inspirations,
+            "source": "chord_generator",
             "timestamp": datetime.now().isoformat()
         }
     except Exception as e:
         logger.error(f"Error in generate_chord_progression: {str(e)}")
         return {
             "error": str(e),
-            "chord_progression": [
-                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0},
-                {"chord_name": "Dm7", "notes": [62, 65, 69, 72], "duration": 1.0},
-                {"chord_name": "G7", "notes": [67, 71, 74, 77], "duration": 1.0},
-                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}
-            ],
-            "source": "chord_progression_error",
+            "source": "chord_generator_error",
             "timestamp": datetime.now().isoformat()
         }
 
-def generate_melody(chord_progression: List[Dict], style: str, key: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Generate a melody based on chord progression, style, and key"""
+def generate_lyrics(description: str, inspirations: List[str], chords: Dict[str, List[str]], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Generate lyrics for verse and chorus based on description and inspirations"""
     try:
-        # Get scale notes for the key
-        scale = MusicReference.get_scale(key)
+        # Prepare system message for lyrics generation
+        system_message = """You are a lyricist specializing in songwriting. 
+        You'll create lyrics for a verse and chorus based on a song description and musical inspirations.
+        Focus on creating ONE verse and ONE chorus that fit with the given chord progressions in 4/4 time.
+        Your lyrics should match the mood and theme suggested by both the description and chord progressions.
+        Your response should be in JSON format with 'verse' and 'chorus' keys, each containing the lyrics as a string."""
         
-        # Prepare system message
-        system_message = "You are a music composition assistant specialized in melody creation."
+        # Prepare messages for the LLM
+        inspirations_str = ", ".join(inspirations)
+        chords_str = json.dumps(chords)
         
-        # Prepare messages for the LLM with improved JSON instructions
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": f"""
-Generate a melody in {key} for {style} style music that fits over this chord progression: {json.dumps(chord_progression)}
-
-IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
-Format each note as:
-{{"pitch": 60, "duration": 0.5, "velocity": 80}}
-
-Your response must begin with '[' and end with ']' with no other text before or after.
-Example of a valid response format:
-[
-  {{"pitch": 60, "duration": 0.5, "velocity": 80}},
-  {{"pitch": 62, "duration": 0.5, "velocity": 80}},
-  {{"pitch": 64, "duration": 0.5, "velocity": 80}},
-  {{"pitch": 65, "duration": 0.5, "velocity": 80}},
-  {{"pitch": 67, "duration": 1.0, "velocity": 90}}
-]
-
-Do not include any explanation, just the JSON array.
-"""}
+            {"role": "user", "content": f"Create lyrics for a song with this description: {description}\n\n"
+                                        f"Musical inspirations: {inspirations_str}\n\n"
+                                        f"Chord progressions: {chords_str}"}
         ]
         
         # Add context if provided
@@ -561,48 +466,199 @@ Do not include any explanation, just the JSON array.
             context_str = json.dumps(context)
             messages.append({"role": "user", "content": f"Additional context: {context_str}"})
         
-        # Add information about scales
-        messages.append({"role": "user", "content": f"Scale notes for {key}: {', '.join(scale)}."})
+        # Generate lyrics
+        lyrics_response = ai_client.generate_chat_completion(
+            messages=messages,
+            max_tokens=800,
+            temperature=0.8  # Higher temperature for more creative lyrics
+        )
+        
+        # Extract JSON from the response
+        import re
+        json_match = re.search(r'({.*?})', lyrics_response.replace('\n', ' '), re.DOTALL)
+        
+        if json_match:
+            lyrics_json = json_match.group(1)
+            lyrics = json.loads(lyrics_json)
+        else:
+            # Fallback to parsing manually if JSON format is not perfect
+            logger.warning("Couldn't parse JSON directly, attempting manual extraction")
+            
+            verse_match = re.search(r'verse"?\s*:\s*"(.*?)"', lyrics_response, re.DOTALL)
+            chorus_match = re.search(r'chorus"?\s*:\s*"(.*?)"', lyrics_response, re.DOTALL)
+            
+            verse_lyrics = ""
+            chorus_lyrics = ""
+            
+            if verse_match:
+                verse_lyrics = verse_match.group(1).strip()
+            else:
+                # Look for verse content not in JSON format
+                verse_section = re.search(r'Verse:?\s*(.*?)(?=Chorus:|$)', lyrics_response, re.DOTALL)
+                if verse_section:
+                    verse_lyrics = verse_section.group(1).strip()
+            
+            if chorus_match:
+                chorus_lyrics = chorus_match.group(1).strip()
+            else:
+                # Look for chorus content not in JSON format
+                chorus_section = re.search(r'Chorus:?\s*(.*?)(?=Verse:|$)', lyrics_response, re.DOTALL)
+                if chorus_section:
+                    chorus_lyrics = chorus_section.group(1).strip()
+            
+            lyrics = {
+                "verse": verse_lyrics if verse_lyrics else "Default verse lyrics for the song.",
+                "chorus": chorus_lyrics if chorus_lyrics else "Default chorus lyrics for the song."
+            }
+        
+        return {
+            "lyrics": lyrics,
+            "description": description,
+            "inspirations": inspirations,
+            "chords": chords,
+            "source": "lyrics_generator",
+            "timestamp": datetime.now().isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error in generate_lyrics: {str(e)}")
+        return {
+            "error": str(e),
+            "source": "lyrics_generator_error",
+            "timestamp": datetime.now().isoformat()
+        }
+
+def generate_melody(description: str, inspirations: List[str], chords: Dict[str, List[str]], lyrics: Dict[str, str], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Generate melody based on lyrics and chords"""
+    try:
+        # Prepare system message for melody generation
+        system_message = """You are a melody composer specializing in songwriting. 
+        You'll create a melody for verse and chorus lyrics based on chord progressions.
+        Focus on assigning notes and durations to each syllable of the lyrics in 4/4 time.
+        For each syllable, specify a pitch (e.g., C4, D4, E4) and a duration (in quarter notes).
+        Your response should be in JSON format with 'verse' and 'chorus' keys, each containing an array of note objects.
+        Each note object should have 'pitch', 'duration', and 'syllable' keys."""
+        
+        # Prepare messages for the LLM
+        inspirations_str = ", ".join(inspirations)
+        chords_str = json.dumps(chords)
+        lyrics_str = json.dumps(lyrics)
+        
+        messages = [
+            {"role": "system", "content": system_message},
+            {"role": "user", "content": f"Create a melody for a song with this description: {description}\n\n"
+                                        f"Musical inspirations: {inspirations_str}\n\n"
+                                        f"Chord progressions: {chords_str}\n\n"
+                                        f"Lyrics: {lyrics_str}\n\n"
+                                        f"For each syllable in the lyrics, specify a note (pitch like C4, D4, etc.) and duration (in quarter notes, e.g., 0.5 for eighth note, 1.0 for quarter note, etc.)."}
+        ]
+        
+        # Add context if provided
+        if context:
+            context_str = json.dumps(context)
+            messages.append({"role": "user", "content": f"Additional context: {context_str}"})
         
         # Generate melody
-        melody_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
+        melody_response = ai_client.generate_chat_completion(
+            messages=messages,
+            max_tokens=1500,
+            temperature=0.7
+        )
         
-        # Clean the result to ensure it's valid JSON
-        melody_str = melody_str.strip()
+        # Extract JSON from the response
+        import re
+        json_match = re.search(r'({.*})', melody_response.replace('\n', ' '), re.DOTALL)
         
-        # If there's text before the opening bracket, remove it
-        if '[' in melody_str and not melody_str.startswith('['):
-            melody_str = melody_str[melody_str.find('['):]
+        melody = {
+            "verse": [],
+            "chorus": []
+        }
+        
+        if json_match:
+            try:
+                melody_json = json_match.group(1)
+                melody_data = json.loads(melody_json)
+                melody = melody_data
+            except json.JSONDecodeError:
+                logger.warning("JSON decode error, using manual extraction")
+                # Continue to manual extraction
+        
+        # If JSON parsing failed or didn't get expected structure, try manual extraction
+        if not melody.get("verse") and not melody.get("chorus"):
+            logger.warning("Using manual extraction for melody")
             
-        # If there's text after the closing bracket, remove it
-        if ']' in melody_str and not melody_str.endswith(']'):
-            melody_str = melody_str[:melody_str.rfind(']')+1]
+            # Look for verse notes
+            verse_section = re.search(r'verse"?\s*:\s*\[(.*?)\]', melody_response, re.DOTALL)
+            if verse_section:
+                verse_notes_str = verse_section.group(1)
+                
+                # Extract individual note objects
+                note_pattern = r'{(.*?)}'
+                note_matches = re.finditer(note_pattern, verse_notes_str)
+                
+                for note_match in note_matches:
+                    note_str = note_match.group(1)
+                    
+                    # Extract pitch, duration, and syllable
+                    pitch_match = re.search(r'pitch"?\s*:\s*"?([A-G][#b]?[0-9])"?', note_str)
+                    duration_match = re.search(r'duration"?\s*:\s*([0-9.]+)', note_str)
+                    syllable_match = re.search(r'syllable"?\s*:\s*"([^"]*)"', note_str)
+                    
+                    if pitch_match and duration_match:
+                        pitch = pitch_match.group(1)
+                        duration = float(duration_match.group(1))
+                        syllable = syllable_match.group(1) if syllable_match else ""
+                        
+                        melody["verse"].append({
+                            "pitch": pitch,
+                            "duration": duration,
+                            "syllable": syllable
+                        })
+            
+            # Look for chorus notes
+            chorus_section = re.search(r'chorus"?\s*:\s*\[(.*?)\]', melody_response, re.DOTALL)
+            if chorus_section:
+                chorus_notes_str = chorus_section.group(1)
+                
+                # Extract individual note objects
+                note_pattern = r'{(.*?)}'
+                note_matches = re.finditer(note_pattern, chorus_notes_str)
+                
+                for note_match in note_matches:
+                    note_str = note_match.group(1)
+                    
+                    # Extract pitch, duration, and syllable
+                    pitch_match = re.search(r'pitch"?\s*:\s*"?([A-G][#b]?[0-9])"?', note_str)
+                    duration_match = re.search(r'duration"?\s*:\s*([0-9.]+)', note_str)
+                    syllable_match = re.search(r'syllable"?\s*:\s*"([^"]*)"', note_str)
+                    
+                    if pitch_match and duration_match:
+                        pitch = pitch_match.group(1)
+                        duration = float(duration_match.group(1))
+                        syllable = syllable_match.group(1) if syllable_match else ""
+                        
+                        melody["chorus"].append({
+                            "pitch": pitch,
+                            "duration": duration,
+                            "syllable": syllable
+                        })
         
-        # Parse the result
-        try:
-            melody = json.loads(melody_str)
-            if not isinstance(melody, list):
-                raise json.JSONDecodeError("Not a list", melody_str, 0)
-        except json.JSONDecodeError as e:
-            # Fallback in case the LLM doesn't return valid JSON
-            logger.warning(f"LLM didn't return valid JSON for melody: {str(e)}, using simplified format")
-            # Create a simple example melody
-            melody = [
-                {"pitch": 60, "duration": 0.5, "velocity": 80},
-                {"pitch": 62, "duration": 0.5, "velocity": 80},
-                {"pitch": 64, "duration": 0.5, "velocity": 80},
-                {"pitch": 65, "duration": 0.5, "velocity": 80},
-                {"pitch": 67, "duration": 1.0, "velocity": 90},
-                {"pitch": 65, "duration": 0.5, "velocity": 80},
-                {"pitch": 64, "duration": 0.5, "velocity": 80},
-                {"pitch": 62, "duration": 0.5, "velocity": 80},
-                {"pitch": 60, "duration": 1.0, "velocity": 90}
-            ]
+        # If still empty, create a simple default melody
+        if not melody.get("verse"):
+            # Create a simple default melody
+            verse_syllables = syllabify(lyrics.get("verse", "Default verse lyrics"))
+            melody["verse"] = generate_default_melody(verse_syllables, chords.get("verse", ["C", "G", "Am", "F"]))
+        
+        if not melody.get("chorus"):
+            # Create a simple default melody
+            chorus_syllables = syllabify(lyrics.get("chorus", "Default chorus lyrics"))
+            melody["chorus"] = generate_default_melody(chorus_syllables, chords.get("chorus", ["F", "C", "G", "Am"]))
         
         return {
             "melody": melody,
-            "key": key,
-            "style": style,
+            "description": description,
+            "inspirations": inspirations,
+            "chords": chords,
+            "lyrics": lyrics,
             "source": "melody_generator",
             "timestamp": datetime.now().isoformat()
         }
@@ -610,242 +666,101 @@ Do not include any explanation, just the JSON array.
         logger.error(f"Error in generate_melody: {str(e)}")
         return {
             "error": str(e),
-            "melody": [
-                {"pitch": 60, "duration": 0.5, "velocity": 80},
-                {"pitch": 62, "duration": 0.5, "velocity": 80},
-                {"pitch": 64, "duration": 0.5, "velocity": 80},
-                {"pitch": 65, "duration": 0.5, "velocity": 80},
-                {"pitch": 67, "duration": 1.0, "velocity": 90},
-                {"pitch": 65, "duration": 0.5, "velocity": 80},
-                {"pitch": 64, "duration": 0.5, "velocity": 80},
-                {"pitch": 62, "duration": 0.5, "velocity": 80},
-                {"pitch": 60, "duration": 1.0, "velocity": 90}
-            ],
-            "source": "melody_error",
+            "source": "melody_generator_error",
             "timestamp": datetime.now().isoformat()
         }
 
-def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Generate drum patterns based on style and time signature"""
-    try:
-        # Prepare system message
-        system_message = "You are a music composition assistant specialized in drum programming."
+def syllabify(text):
+    """Simple syllable counter - splits text into approximate syllables"""
+    if not text:
+        return []
         
-        # Prepare messages for the LLM with improved JSON instructions
-        messages = [
-            {"role": "system", "content": system_message},
-            {"role": "user", "content": f"""
-Generate a {length}-measure drum pattern in {time_signature} time for {style} style music.
-
-IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
-Format each drum hit as:
-{{"instrument": 36, "velocity": 90, "position": 0.0}}
-
-Where:
-- instrument is MIDI note number (36=bass drum, 38=snare, 42=hi-hat closed, 46=hi-hat open, 51=ride)
-- velocity is 0-127
-- position is the beat position in the measure (0.0 is the first beat)
-
-Your response must begin with '[' and end with ']' with no other text before or after.
-Example of a valid response format:
-[
-  {{"instrument": 36, "velocity": 90, "position": 0.0}},
-  {{"instrument": 38, "velocity": 90, "position": 1.0}},
-  {{"instrument": 42, "velocity": 70, "position": 0.0}},
-  {{"instrument": 42, "velocity": 70, "position": 0.5}}
-]
-
-Do not include any explanation, just the JSON array.
-"""}
-        ]
+    # Remove punctuation except apostrophes
+    import re
+    text = re.sub(r'[^\w\s\']', '', text)
+    
+    # Split into words
+    words = text.split()
+    
+    syllables = []
+    for word in words:
+        # Count vowel sequences as syllables
+        vowels = "aeiouy"
+        count = 0
+        in_vowel_group = False
         
-        # Add context if provided
-        if context:
-            context_str = json.dumps(context)
-            messages.append({"role": "user", "content": f"Additional context: {context_str}"})
-        
-        # Generate drum pattern
-        drums_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
-        
-        # Clean the result to ensure it's valid JSON
-        drums_str = drums_str.strip()
-        
-        # If there's text before the opening bracket, remove it
-        if '[' in drums_str and not drums_str.startswith('['):
-            drums_str = drums_str[drums_str.find('['):]
-            
-        # If there's text after the closing bracket, remove it
-        if ']' in drums_str and not drums_str.endswith(']'):
-            drums_str = drums_str[:drums_str.rfind(']')+1]
-        
-        # Parse the result
-        try:
-            drums = json.loads(drums_str)
-            if not isinstance(drums, list):
-                raise json.JSONDecodeError("Not a list", drums_str, 0)
-        except json.JSONDecodeError as e:
-            # Fallback in case the LLM doesn't return valid JSON
-            logger.warning(f"LLM didn't return valid JSON for drums: {str(e)}, using simplified format")
-            # Create a simple example drum pattern
-            if time_signature == "4/4":
-                drums = [
-                    {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
-                    {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
-                    {"instrument": 36, "velocity": 90, "position": 2.0},  # Bass drum on beat 3
-                    {"instrument": 38, "velocity": 90, "position": 3.0},  # Snare on beat 4
-                    {"instrument": 42, "velocity": 70, "position": 0.0},  # Hi-hat on each eighth note
-                    {"instrument": 42, "velocity": 70, "position": 0.5},
-                    {"instrument": 42, "velocity": 70, "position": 1.0},
-                    {"instrument": 42, "velocity": 70, "position": 1.5},
-                    {"instrument": 42, "velocity": 70, "position": 2.0},
-                    {"instrument": 42, "velocity": 70, "position": 2.5},
-                    {"instrument": 42, "velocity": 70, "position": 3.0},
-                    {"instrument": 42, "velocity": 70, "position": 3.5}
-                ]
+        for char in word.lower():
+            if char in vowels:
+                if not in_vowel_group:
+                    count += 1
+                    in_vowel_group = True
             else:
-                # Simple 3/4 pattern
-                drums = [
-                    {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
-                    {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
-                    {"instrument": 38, "velocity": 90, "position": 2.0},  # Snare on beat 3
-                    {"instrument": 42, "velocity": 70, "position": 0.0},  # Hi-hat on each beat
-                    {"instrument": 42, "velocity": 70, "position": 1.0},
-                    {"instrument": 42, "velocity": 70, "position": 2.0}
-                ]
+                in_vowel_group = False
         
-        # Transform to the expected format for the composition
-        drum_hits = []
-        for hit in drums:
-            # Convert position to time-based format
-            measure_length = 4.0  # In quarter notes for 4/4
-            if time_signature == "3/4":
-                measure_length = 3.0
+        # Ensure at least one syllable per word
+        if count == 0:
+            count = 1
             
-            # Create multiple measures
-            for measure in range(length):
-                drum_hits.append({
-                    "instrument": hit.get("instrument", 36),
-                    "velocity": hit.get("velocity", 80),
-                    "position": hit.get("position", 0.0) + (measure * measure_length)
-                })
-        
-        return {
-            "drums": drum_hits,
-            "style": style,
-            "time_signature": time_signature,
-            "source": "drum_generator",
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error in generate_drums: {str(e)}")
-        # Create a simple fallback drum pattern
-        if time_signature == "4/4":
-            drum_hits = [
-                {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
-                {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
-                {"instrument": 36, "velocity": 90, "position": 2.0},  # Bass drum on beat 3
-                {"instrument": 38, "velocity": 90, "position": 3.0},  # Snare on beat 4
-            ]
-            # Repeat for all measures
-            for measure in range(1, length):
-                for hit in drum_hits[:]:
-                    drum_hits.append({
-                        "instrument": hit["instrument"],
-                        "velocity": hit["velocity"],
-                        "position": hit["position"] + (measure * 4.0)
-                    })
-        else:
-            # Simple 3/4 pattern
-            drum_hits = [
-                {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
-                {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
-                {"instrument": 38, "velocity": 90, "position": 2.0},  # Snare on beat 3
-            ]
-            # Repeat for all measures
-            for measure in range(1, length):
-                for hit in drum_hits[:]:
-                    drum_hits.append({
-                        "instrument": hit["instrument"],
-                        "velocity": hit["velocity"],
-                        "position": hit["position"] + (measure * 3.0)
-                    })
-            
-        return {
-            "error": str(e),
-            "drums": drum_hits,
-            "source": "drum_error",
-            "timestamp": datetime.now().isoformat()
-        }
+        # Add each syllable to the list
+        for i in range(count):
+            syllables.append(word if count == 1 else f"{word}_{i+1}")
+    
+    return syllables
 
-def assemble_composition(
-    chord_progression: Dict[str, Any],
-    melody: Dict[str, Any],
-    drums: Dict[str, Any],
-    parameters: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Assemble all musical components into a complete composition"""
-    try:
-        # Extract parameters
-        style = parameters.get("style", "pop")
-        key = parameters.get("key", "C major")
-        tempo = parameters.get("tempo", 120)
-        time_signature = parameters.get("time_signature", "4/4")
-        title = parameters.get("title", f"{style.capitalize()} Composition in {key}")
+def generate_default_melody(syllables, chords):
+    """Generate a simple default melody based on syllables and chords"""
+    if not syllables or not chords:
+        return []
+    
+    # Basic pitches for each chord
+    chord_pitches = {
+        "C": ["C4", "E4", "G4"],
+        "G": ["G4", "B4", "D4"],
+        "Am": ["A4", "C4", "E4"],
+        "F": ["F4", "A4", "C4"],
+        "Dm": ["D4", "F4", "A4"],
+        "Em": ["E4", "G4", "B4"],
+        # Add more chords as needed
+    }
+    
+    # Default to C major scale if chord not recognized
+    default_pitches = ["C4", "D4", "E4", "F4", "G4", "A4", "B4"]
+    
+    melody = []
+    chord_idx = 0
+    beats_per_chord = 4  # 4 beats per chord in 4/4 time
+    current_beat = 0
+    
+    for syllable in syllables:
+        # Determine which chord we're currently on
+        current_chord = chords[chord_idx % len(chords)]
         
-        # Extract components with fallbacks
-        chords = chord_progression.get("chord_progression", [])
-        if not isinstance(chords, list):
-            logger.warning("Invalid chord_progression, using empty list")
-            chords = []
-            
-        melody_notes = melody.get("melody", [])
-        if not isinstance(melody_notes, list):
-            logger.warning("Invalid melody, using empty list")
-            melody_notes = []
-            
-        drum_hits = drums.get("drums", [])
-        if not isinstance(drum_hits, list):
-            logger.warning("Invalid drums, using empty list")
-            drum_hits = []
+        # Get available pitches for this chord
+        available_pitches = chord_pitches.get(current_chord, default_pitches)
         
-        # Assemble the composition data
-        composition = {
-            "title": title,
-            "style": style,
-            "key": key,
-            "tempo": tempo,
-            "time_signature": time_signature,
-            "chord_progression": chords,
-            "melody": melody_notes,
-            "drums": drum_hits,
-            "creation_date": datetime.now().isoformat()
-        }
+        # Choose a pitch based on position in the sequence
+        pitch_idx = len(melody) % len(available_pitches)
+        pitch = available_pitches[pitch_idx]
         
-        return {
-            "composition": composition,
-            "source": "composition_assembler",
-            "timestamp": datetime.now().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error in assemble_composition: {str(e)}")
-        # Return a basic composition with empty components
-        composition = {
-            "title": f"Composition in C major",
-            "style": "pop",
-            "key": "C major",
-            "tempo": 120,
-            "time_signature": "4/4",
-            "chord_progression": [],
-            "melody": [],
-            "drums": [],
-            "creation_date": datetime.now().isoformat()
-        }
-        return {
-            "error": str(e),
-            "composition": composition,
-            "source": "composition_error",
-            "timestamp": datetime.now().isoformat()
-        }
+        # Default to quarter notes, with occasional eighth notes
+        duration = 0.5 if len(melody) % 3 == 0 else 1.0
+        
+        # Add the note to the melody
+        melody.append({
+            "pitch": pitch,
+            "duration": duration,
+            "syllable": syllable
+        })
+        
+        # Update beat counter
+        current_beat += duration
+        
+        # Move to next chord if we've filled this one
+        if current_beat >= beats_per_chord:
+            chord_idx += 1
+            current_beat = 0
+    
+    return melody
 
 # Define AutoGen tool functions with proper format
 def register_autogen_functions():
@@ -853,123 +768,102 @@ def register_autogen_functions():
     function_map = {
         "generate_chords": {
             "name": "generate_chords",
-            "description": "Generate chord progressions based on style and key",
+            "description": "Generate chord progressions for verse and chorus",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "style": {
+                    "description": {
                         "type": "string",
-                        "description": "Musical style (e.g., jazz, rock, pop, classical)"
+                        "description": "Description of the song's theme and mood"
                     },
-                    "key": {
-                        "type": "string",
-                        "description": "Musical key (e.g., C major, A minor)"
-                    },
-                    "length": {
-                        "type": "integer",
-                        "description": "Number of measures in the progression",
-                        "default": 4
+                    "inspirations": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of musical artists that inspire this song"
                     },
                     "context": {
                         "type": "object",
-                        "description": "Additional context for the chord progression"
+                        "description": "Additional context for chord generation"
                     }
                 },
-                "required": ["style", "key"]
+                "required": ["description", "inspirations"]
             },
             "function": generate_chord_progression
         },
+        "generate_lyrics": {
+            "name": "generate_lyrics",
+            "description": "Generate lyrics for verse and chorus",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Description of the song's theme and mood"
+                    },
+                    "inspirations": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of musical artists that inspire this song"
+                    },
+                    "chords": {
+                        "type": "object",
+                        "description": "Chord progressions for verse and chorus"
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Additional context for lyrics generation"
+                    }
+                },
+                "required": ["description", "inspirations", "chords"]
+            },
+            "function": generate_lyrics
+        },
         "generate_melody": {
             "name": "generate_melody",
-            "description": "Generate a melody that fits over a chord progression",
+            "description": "Generate melody based on lyrics and chords",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "chord_progression": {
+                    "description": {
+                        "type": "string",
+                        "description": "Description of the song's theme and mood"
+                    },
+                    "inspirations": {
                         "type": "array",
-                        "description": "The chord progression to fit the melody to"
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of musical artists that inspire this song"
                     },
-                    "style": {
-                        "type": "string",
-                        "description": "Musical style (e.g., jazz, rock, pop, classical)"
+                    "chords": {
+                        "type": "object",
+                        "description": "Chord progressions for verse and chorus"
                     },
-                    "key": {
-                        "type": "string",
-                        "description": "Musical key (e.g., C major, A minor)"
+                    "lyrics": {
+                        "type": "object",
+                        "description": "Lyrics for verse and chorus"
                     },
                     "context": {
                         "type": "object",
-                        "description": "Additional context for the melody"
+                        "description": "Additional context for melody generation"
                     }
                 },
-                "required": ["chord_progression", "style", "key"]
+                "required": ["description", "inspirations", "chords", "lyrics"]
             },
             "function": generate_melody
-        },
-        "generate_drums": {
-            "name": "generate_drums",
-            "description": "Generate drum patterns based on style and time signature",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "style": {
-                        "type": "string",
-                        "description": "Musical style (e.g., jazz, rock, pop, classical)"
-                    },
-                    "length": {
-                        "type": "integer",
-                        "description": "Number of measures in the pattern",
-                        "default": 4
-                    },
-                    "time_signature": {
-                        "type": "string",
-                        "description": "Time signature (e.g., 4/4, 3/4, 6/8)",
-                        "default": "4/4"
-                    },
-                    "context": {
-                        "type": "object",
-                        "description": "Additional context for the drum pattern"
-                    }
-                },
-                "required": ["style"]
-            },
-            "function": generate_drums
-        },
-        "assemble_composition": {
-            "name": "assemble_composition",
-            "description": "Assemble all musical components into a complete composition",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "chord_progression": {
-                        "type": "object",
-                        "description": "The chord progression data"
-                    },
-                    "melody": {
-                        "type": "object",
-                        "description": "The melody data"
-                    },
-                    "drums": {
-                        "type": "object",
-                        "description": "The drum pattern data"
-                    },
-                    "parameters": {
-                        "type": "object",
-                        "description": "Additional composition parameters"
-                    }
-                },
-                "required": ["chord_progression", "melody", "drums", "parameters"]
-            },
-            "function": assemble_composition
         }
     }
     
     return function_map
 
 # AutoGen Agent System
-class MusicCompositionSystem:
+class SongwritingAgentSystem:
     def __init__(self):
-        """Initialize the AutoGen-based music composition system"""
+        """Initialize the AutoGen-based songwriting agent system"""
         # Configure AutoGen for Azure OpenAI
         llm_config = {
             "config_list": [
@@ -981,16 +875,53 @@ class MusicCompositionSystem:
                     "api_version": os.getenv("API_VERSION"),
                 }
             ],
-            "temperature": 0.7
+            "temperature": 0.7  # Higher temperature for creative agents
         }
         
         # Register tool functions
         self.function_map = register_autogen_functions()
         
+        # Create the router agent (LLM-based)
+        self.router_agent = AssistantAgent(
+            name="RouterAgent",
+            system_message="""You are a songwriting assistant router. Your job is to determine which specialist to route 
+            user queries to based on the content. You have three specialists available:
+            1. ChordProgressionAgent - For generating chord progressions
+            2. LyricsAgent - For generating lyrics
+            3. MelodyAgent - For creating melodies
+            
+            Determine which specialist should handle the query and route it appropriately.
+            """,
+            llm_config={
+                **llm_config,
+                "functions": [
+                    {
+                        "name": "route_to_specialist",
+                        "description": "Route the request to the appropriate specialist",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "specialist": {
+                                    "type": "string",
+                                    "description": "The specialist to route to",
+                                    "enum": ["ChordProgressionAgent", "LyricsAgent", "MelodyAgent"]
+                                },
+                                "reason": {
+                                    "type": "string",
+                                    "description": "Reason for selecting this specialist"
+                                }
+                            },
+                            "required": ["specialist"]
+                        }
+                    }
+                ]
+            }
+        )
+        
         # Create specialist agents with their tools
-        self.chord_specialist = AssistantAgent(
-            name="ChordSpecialist",
-            system_message="You are a music harmony specialist. You can generate chord progressions based on style, key, and other parameters.",
+        self.chord_progression_agent = AssistantAgent(
+            name="ChordProgressionAgent",
+            system_message="You are a music theory expert specializing in chord progressions. You can generate chord progressions for verse and chorus based on song descriptions and musical inspirations.",
             llm_config={
                 **llm_config,
                 "functions": [
@@ -999,35 +930,24 @@ class MusicCompositionSystem:
             }
         )
         
-        self.melody_specialist = AssistantAgent(
-            name="MelodySpecialist",
-            system_message="You are a melody creation specialist. You can generate melodies that fit over chord progressions for various styles and keys.",
+        self.lyrics_agent = AssistantAgent(
+            name="LyricsAgent",
+            system_message="You are a lyricist specializing in songwriting. You can create lyrics for verse and chorus based on song descriptions, musical inspirations, and chord progressions.",
+            llm_config={
+                **llm_config,
+                "functions": [
+                    self.function_map["generate_lyrics"]
+                ]
+            }
+        )
+        
+        self.melody_agent = AssistantAgent(
+            name="MelodyAgent",
+            system_message="You are a melody composer specializing in songwriting. You can create melodies for lyrics based on chord progressions and lyrics.",
             llm_config={
                 **llm_config,
                 "functions": [
                     self.function_map["generate_melody"]
-                ]
-            }
-        )
-        
-        self.drum_specialist = AssistantAgent(
-            name="DrumSpecialist",
-            system_message="You are a rhythm and percussion specialist. You can generate drum patterns for various styles and time signatures.",
-            llm_config={
-                **llm_config,
-                "functions": [
-                    self.function_map["generate_drums"]
-                ]
-            }
-        )
-        
-        self.composition_assembler = AssistantAgent(
-            name="CompositionAssembler",
-            system_message="You are a music composition assembler. You can combine chord progressions, melodies, and drum patterns into complete musical compositions.",
-            llm_config={
-                **llm_config,
-                "functions": [
-                    self.function_map["assemble_composition"]
                 ]
             }
         )
@@ -1038,205 +958,263 @@ class MusicCompositionSystem:
             human_input_mode="NEVER",  # No actual human input needed
             code_execution_config=False  # Disable code execution
         )
+        
+        # Map specialists to their respective functions for direct execution
+        self.specialist_function_map = {
+            "ChordProgressionAgent": self.function_map["generate_chords"]["function"],
+            "LyricsAgent": self.function_map["generate_lyrics"]["function"],
+            "MelodyAgent": self.function_map["generate_melody"]["function"]
+        }
     
-    async def compose_music(self, parameters: MusicParameters) -> Response:
-        """Create a full music composition based on the provided parameters"""
+    async def create_song(self, description: str, inspirations: List[str], title: Optional[str] = None, tempo: int = 120) -> Response:
+        """Create a complete song using the agent system"""
         try:
-            # Extract parameters
-            style = parameters.style
-            key = parameters.key
-            tempo = parameters.tempo
-            length = parameters.length
-            time_signature = parameters.time_signature
-            additional_notes = parameters.additional_notes
+            # Step 1: Generate chord progressions
+            logger.info("Generating chord progressions...")
+            chord_result = generate_chord_progression(description, inspirations)
             
-            # Context for the specialists
-            context = {}
-            if additional_notes:
-                context["additional_notes"] = additional_notes
+            if "error" in chord_result:
+                return Response(
+                    result=f"Error generating chord progressions: {chord_result['error']}",
+                    source="agent_error",
+                    timestamp=datetime.now().isoformat()
+                )
             
-            # Step 1: Generate chord progression
-            logger.info(f"Generating chord progression for {style} in {key}")
-            chord_result = generate_chord_progression(
-                style=style,
-                key=key,
-                length=length,
-                context=context
-            )
+            chords = chord_result["chords"]
+            logger.info(f"Generated chords: {chords}")
             
-            # Step 2: Generate melody based on the chord progression
-            logger.info(f"Generating melody for {style} in {key}")
-            melody_result = generate_melody(
-                chord_progression=chord_result["chord_progression"],
-                style=style,
-                key=key,
-                context=context
-            )
+            # Step 2: Generate lyrics
+            logger.info("Generating lyrics...")
+            lyrics_result = generate_lyrics(description, inspirations, chords)
             
-            # Step 3: Generate drum pattern
-            logger.info(f"Generating drum pattern for {style} in {time_signature}")
-            drum_result = generate_drums(
-                style=style,
-                length=length,
-                time_signature=time_signature,
-                context=context
-            )
+            if "error" in lyrics_result:
+                return Response(
+                    result=f"Error generating lyrics: {lyrics_result['error']}",
+                    source="agent_error",
+                    timestamp=datetime.now().isoformat()
+                )
             
-            # Step 4: Assemble the composition
-            logger.info("Assembling composition")
-            composition_params = {
-                "style": style,
-                "key": key,
-                "tempo": tempo,
-                "time_signature": time_signature,
-                "title": f"{style.capitalize()} Composition in {key}"
-            }
+            lyrics = lyrics_result["lyrics"]
+            logger.info(f"Generated lyrics for verse and chorus")
             
-            composition_result = assemble_composition(
-                chord_progression=chord_result,
-                melody=melody_result,
-                drums=drum_result,
-                parameters=composition_params
-            )
+            # Step 3: Generate melody
+            logger.info("Generating melody...")
+            melody_result = generate_melody(description, inspirations, chords, lyrics)
             
-            # Step 5: Generate MIDI file from the composition
-            logger.info("Creating MIDI file")
-            composition_data = composition_result["composition"]
-            midi_file = MusicProcessor.create_midi_from_composition(composition_data)
+            if "error" in melody_result:
+                return Response(
+                    result=f"Error generating melody: {melody_result['error']}",
+                    source="agent_error",
+                    timestamp=datetime.now().isoformat()
+                )
             
-            # Step 6: Generate sheet music
-            logger.info("Creating sheet music")
-            sheet_music_file = MusicProcessor.create_sheet_music(composition_data)
+            melody = melody_result["melody"]
+            logger.info(f"Generated melody for verse and chorus")
             
-            # Ensure both files were created successfully
-            if not midi_file or not sheet_music_file:
-                raise ValueError("Failed to create MIDI or sheet music file")
-                
-            # Save files to disk with unique IDs
-            composition_id = f"comp_{datetime.now().strftime('%Y%m%d%H%M%S')}"
-            midi_path = f"compositions/{composition_id}.mid"
-            sheet_music_path = f"compositions/{composition_id}.musicxml"
+            # Step 4: Generate MIDI file
+            if not title:
+                title = f"Song about {description[:20]}"
             
-            # Ensure directory exists
-            os.makedirs("compositions", exist_ok=True)
+            logger.info(f"Generating MIDI file with title: {title}, tempo: {tempo}...")
+            midi_path = MusicProcessor.generate_midi_file(chords, melody, title, tempo)
             
-            # Write files
-            with open(midi_path, "wb") as f:
-                f.write(midi_file.getvalue())
-            
-            with open(sheet_music_path, "wb") as f:
-                f.write(sheet_music_file.getvalue())
-            
-            logger.info(f"Composition created successfully with ID: {composition_id}")
-            
-            # Create response
+            # Prepare result
             result = {
-                "composition_id": composition_id,
-                "title": composition_data["title"],
-                "style": style,
-                "key": key,
+                "title": title,
+                "description": description,
+                "inspirations": inspirations,
                 "tempo": tempo,
-                "time_signature": time_signature,
-                "length": length,
-                "midi_file": midi_path,
-                "sheet_music_file": sheet_music_path,
-                "composition_data": composition_data
+                "chords": chords,
+                "lyrics": lyrics,
+                "melody_summary": {
+                    "verse_notes": len(melody["verse"]),
+                    "chorus_notes": len(melody["chorus"])
+                },
+                "midi_file": midi_path
             }
             
             return Response(
                 result=result,
-                source="music_composition_system",
+                source="songwriting_system",
                 timestamp=datetime.now().isoformat()
             )
+            
         except Exception as e:
-            logger.error(f"Error in compose_music: {str(e)}")
+            logger.error(f"Error in create_song: {str(e)}")
             return Response(
-                result=f"Error composing music: {str(e)}",
-                source="composition_error",
+                result=f"Error creating song: {str(e)}",
+                source="agent_error",
                 timestamp=datetime.now().isoformat()
             )
 
-# Initialize the music composition system
-music_composition_system = MusicCompositionSystem()
+# Initialize the songwriting agent system
+songwriting_agent_system = SongwritingAgentSystem()
 
 # API endpoints
-@app.post("/api/compose", response_model=Response)
-async def compose_music(request: CompositionRequest):
-    """Create a new music composition based on parameters"""
+@app.post("/api/create-song", response_model=Response)
+async def create_song(request: SongRequest):
+    """Create a complete song based on description and inspirations"""
+    return await songwriting_agent_system.create_song(
+        description=request.description,
+        inspirations=request.inspirations,
+        title=request.title,
+        tempo=request.tempo or 120
+    )
+
+@app.post("/api/generate-chords", response_model=Response)
+async def generate_chords(request: ChordProgressionRequest):
+    """Generate chord progressions for verse and chorus"""
+    result = generate_chord_progression(
+        description=request.description,
+        inspirations=request.inspirations,
+        context=request.context
+    )
+    
+    return Response(
+        result=result,
+        source=result.get("source", "chord_generator"),
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.post("/api/generate-lyrics", response_model=Response)
+async def generate_lyrics_endpoint(request: LyricsRequest):
+    """Generate lyrics for verse and chorus"""
+    result = generate_lyrics(
+        description=request.description,
+        inspirations=request.inspirations,
+        chords=request.chords,
+        context=request.context
+    )
+    
+    return Response(
+        result=result,
+        source=result.get("source", "lyrics_generator"),
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.post("/api/generate-melody", response_model=Response)
+async def generate_melody_endpoint(request: MelodyRequest):
+    """Generate melody based on lyrics and chords"""
+    result = generate_melody(
+        description=request.description,
+        inspirations=request.inspirations,
+        chords=request.chords,
+        lyrics=request.lyrics,
+        context=request.context
+    )
+    
+    return Response(
+        result=result,
+        source=result.get("source", "melody_generator"),
+        timestamp=datetime.now().isoformat()
+    )
+
+@app.get("/api/download/{song_title}")
+async def download_midi(song_title: str):
+    """Download the generated MIDI file"""
     try:
-        logger.info(f"Received composition request for {request.parameters.style} in {request.parameters.key}")
-        return await music_composition_system.compose_music(request.parameters)
+        # Find the MIDI file in the songs directory
+        songs_dir = os.path.join(os.getcwd(), "songs")
+        safe_title = "".join([c for c in song_title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        if not safe_title:
+            safe_title = "song"
+            
+        # Path to the song's directory and MIDI file
+        song_dir = os.path.join(songs_dir, safe_title.replace(' ', '_'))
+        midi_path = os.path.join(song_dir, f"{safe_title.replace(' ', '_')}.mid")
+        
+        if not os.path.exists(midi_path):
+            raise HTTPException(status_code=404, detail=f"MIDI file for '{song_title}' not found")
+        
+        return FileResponse(
+            path=midi_path,
+            filename=f"{safe_title}.mid",
+            media_type="audio/midi"
+        )
     except Exception as e:
-        logger.error(f"Error in compose_music endpoint: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error composing music: {str(e)}")
+        logger.error(f"Error downloading MIDI: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error downloading MIDI: {str(e)}")
 
-@app.get("/api/composition/{composition_id}/midi")
-async def get_midi_file(composition_id: str):
-    """Get the MIDI file for a composition"""
-    file_path = f"compositions/{composition_id}.mid"
-    if not os.path.exists(file_path):
-        logger.error(f"Composition MIDI file not found: {file_path}")
-        raise HTTPException(status_code=404, detail=f"Composition MIDI file not found")
-    return FileResponse(file_path, media_type="audio/midi", filename=f"{composition_id}.mid")
+# API endpoints for song management
+@app.get("/api/songs")
+def list_songs():
+    """List all generated songs"""
+    try:
+        songs_dir = os.path.join(os.getcwd(), "songs")
+        if not os.path.exists(songs_dir):
+            return {"songs": []}
+        
+        songs = []
+        for song_folder in os.listdir(songs_dir):
+            folder_path = os.path.join(songs_dir, song_folder)
+            if os.path.isdir(folder_path):
+                # Try to read song_info.json if it exists
+                info_path = os.path.join(folder_path, "song_info.json")
+                if os.path.exists(info_path):
+                    try:
+                        with open(info_path, 'r') as f:
+                            song_info = json.load(f)
+                            songs.append({
+                                "title": song_info.get("title", song_folder.replace('_', ' ')),
+                                "creation_date": song_info.get("creation_date", ""),
+                                "folder": song_folder
+                            })
+                    except:
+                        # If JSON can't be read, just use the folder name
+                        songs.append({
+                            "title": song_folder.replace('_', ' '),
+                            "folder": song_folder
+                        })
+                else:
+                    # No song_info.json, just use the folder name
+                    songs.append({
+                        "title": song_folder.replace('_', ' '),
+                        "folder": song_folder
+                    })
+        
+        return {"songs": songs}
+    except Exception as e:
+        logger.error(f"Error listing songs: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error listing songs: {str(e)}")
 
-@app.get("/api/composition/{composition_id}/sheet")
-async def get_sheet_music(composition_id: str):
-    """Get the sheet music for a composition"""
-    file_path = f"compositions/{composition_id}.musicxml"
-    if not os.path.exists(file_path):
-        logger.error(f"Composition sheet music file not found: {file_path}")
-        raise HTTPException(status_code=404, detail=f"Composition sheet music not found")
-    return FileResponse(file_path, media_type="application/vnd.recordare.musicxml+xml", filename=f"{composition_id}.musicxml")
+@app.get("/api/songs/{song_title}")
+def get_song_details(song_title: str):
+    """Get details of a specific song"""
+    try:
+        songs_dir = os.path.join(os.getcwd(), "songs")
+        safe_title = "".join([c for c in song_title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+        if not safe_title:
+            safe_title = "song"
+            
+        song_dir = os.path.join(songs_dir, safe_title.replace(' ', '_'))
+        
+        if not os.path.exists(song_dir):
+            raise HTTPException(status_code=404, detail=f"Song '{song_title}' not found")
+            
+        # Read song_info.json if it exists
+        info_path = os.path.join(song_dir, "song_info.json")
+        if os.path.exists(info_path):
+            with open(info_path, 'r') as f:
+                song_info = json.load(f)
+                # Add the path to the MIDI file
+                song_info["midi_file"] = os.path.join(song_dir, f"{safe_title.replace(' ', '_')}.mid")
+                return song_info
+        else:
+            # Basic info if no JSON file
+            return {
+                "title": song_title,
+                "midi_file": os.path.join(song_dir, f"{safe_title.replace(' ', '_')}.mid")
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting song details: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error getting song details: {str(e)}")
 
 # Health check endpoint
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
-
-# Simple test endpoint to verify fixes
-@app.get("/test")
-async def test_endpoint():
-    """Test the main components of the system without creating a full composition"""
-    try:
-        # Test chord progression generation
-        chord_result = generate_chord_progression(
-            style="jazz",
-            key="C major",
-            length=4
-        )
-        
-        # Test melody generation
-        melody_result = generate_melody(
-            chord_progression=chord_result["chord_progression"],
-            style="jazz",
-            key="C major"
-        )
-        
-        # Test MIDI creation (small test)
-        test_composition = {
-            "title": "Test Composition",
-            "key": "C major",
-            "tempo": 120,
-            "time_signature": "4/4",
-            "chord_progression": chord_result["chord_progression"][:2],
-            "melody": melody_result["melody"][:4],
-            "drums": []
-        }
-        
-        midi_file = MusicProcessor.create_midi_from_composition(test_composition)
-        sheet_music_file = MusicProcessor.create_sheet_music(test_composition)
-        
-        # Both should be BytesIO objects
-        return {
-            "status": "success",
-            "chord_progression_length": len(chord_result["chord_progression"]),
-            "melody_length": len(melody_result["melody"]),
-            "midi_created": midi_file is not None,
-            "sheet_music_created": sheet_music_file is not None
-        }
-    except Exception as e:
-        logger.error(f"Test endpoint error: {str(e)}")
-        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
