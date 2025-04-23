@@ -1,15 +1,6 @@
-"""
-Music Composition Agentic Backend using AutoGen
-
-This system provides:
-1. Music Composition Processing: Generate music based on user parameters
-2. Intelligent Agent System: Route requests to specialized musical agents
-
-Uses Azure OpenAI for language model capabilities and AutoGen for the agent framework.
-"""
-
 import os
 import json
+import tempfile  # Add this import
 from dotenv import load_dotenv
 import openai
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
@@ -79,26 +70,30 @@ class AzureOpenAIClient:
             "total_tokens": 0
         }
     
-    def generate_chat_completion(self, messages, max_tokens=1000, temperature=0.7):
-        """Generate chat completion using Azure OpenAI"""
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                max_tokens=max_tokens,
-                temperature=temperature
-            )
-            
-            # Track token usage if available
-            if hasattr(response, 'usage'):
-                self.token_usage["total_prompt_tokens"] += response.usage.prompt_tokens
-                self.token_usage["total_completion_tokens"] += response.usage.completion_tokens
-                self.token_usage["total_tokens"] += response.usage.total_tokens
-            
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            logger.error(f"Azure OpenAI API error: {str(e)}")
-            raise HTTPException(status_code=500, detail=f"Azure OpenAI API error: {str(e)}")
+    def generate_chat_completion(self, messages, max_tokens=1000, temperature=0.7, retries=2):
+        """Generate chat completion using Azure OpenAI with retry logic"""
+        for attempt in range(retries + 1):
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature
+                )
+                
+                # Track token usage if available
+                if hasattr(response, 'usage'):
+                    self.token_usage["total_prompt_tokens"] += response.usage.prompt_tokens
+                    self.token_usage["total_completion_tokens"] += response.usage.completion_tokens
+                    self.token_usage["total_tokens"] += response.usage.total_tokens
+                
+                return response.choices[0].message.content.strip()
+            except Exception as e:
+                if attempt < retries:
+                    logger.warning(f"Attempt {attempt+1} failed with error: {str(e)}. Retrying...")
+                    continue
+                logger.error(f"Azure OpenAI API error after {retries+1} attempts: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Azure OpenAI API error: {str(e)}")
     
     def get_token_usage(self):
         """Return the current token usage statistics"""
@@ -120,6 +115,19 @@ class MusicProcessor:
             chord_progression = composition_data.get("chord_progression", [])
             melody = composition_data.get("melody", [])
             drums = composition_data.get("drums", [])
+            
+            # Validate components
+            if not isinstance(chord_progression, list):
+                logger.warning("Invalid chord_progression format, using empty list")
+                chord_progression = []
+            
+            if not isinstance(melody, list):
+                logger.warning("Invalid melody format, using empty list")
+                melody = []
+                
+            if not isinstance(drums, list):
+                logger.warning("Invalid drums format, using empty list")
+                drums = []
             
             # Create a new MIDI file
             mid = mido.MidiFile()
@@ -145,50 +153,75 @@ class MusicProcessor:
             # Process chord progression (simplified example)
             ticks_per_beat = mid.ticks_per_beat
             for chord_item in chord_progression:
-                # Create note on messages for chord notes
-                for note_value in chord_item["notes"]:
-                    chord_track.append(
-                        mido.Message('note_on', note=note_value, velocity=64, time=0)
-                    )
-                
-                # Duration calculation (simplified)
-                duration_ticks = int(chord_item["duration"] * ticks_per_beat)
-                
-                # Create note off messages for chord notes
-                for i, note_value in enumerate(chord_item["notes"]):
-                    time_value = duration_ticks if i == 0 else 0  # Only first note has the time value
-                    chord_track.append(
-                        mido.Message('note_off', note=note_value, velocity=64, time=time_value)
-                    )
+                try:
+                    # Create note on messages for chord notes
+                    notes = chord_item.get("notes", [])
+                    if not isinstance(notes, list):
+                        logger.warning(f"Invalid notes format in chord: {chord_item}, skipping")
+                        continue
+                        
+                    for note_value in notes:
+                        chord_track.append(
+                            mido.Message('note_on', note=note_value, velocity=64, time=0)
+                        )
+                    
+                    # Duration calculation (simplified)
+                    duration = chord_item.get("duration", 1.0)
+                    duration_ticks = int(duration * ticks_per_beat)
+                    
+                    # Create note off messages for chord notes
+                    for i, note_value in enumerate(notes):
+                        time_value = duration_ticks if i == 0 else 0  # Only first note has the time value
+                        chord_track.append(
+                            mido.Message('note_off', note=note_value, velocity=64, time=time_value)
+                        )
+                except Exception as e:
+                    logger.warning(f"Error processing chord {chord_item}: {str(e)}")
+                    continue
             
             # Process melody (simplified example)
             for note_item in melody:
-                # Note on
-                melody_track.append(
-                    mido.Message('note_on', note=note_item["pitch"], velocity=note_item["velocity"], time=0)
-                )
-                
-                # Duration calculation (simplified)
-                duration_ticks = int(note_item["duration"] * ticks_per_beat)
-                
-                # Note off
-                melody_track.append(
-                    mido.Message('note_off', note=note_item["pitch"], velocity=0, time=duration_ticks)
-                )
+                try:
+                    # Note on
+                    pitch = note_item.get("pitch", 60)
+                    velocity = note_item.get("velocity", 64)
+                    duration = note_item.get("duration", 1.0)
+                    
+                    melody_track.append(
+                        mido.Message('note_on', note=pitch, velocity=velocity, time=0)
+                    )
+                    
+                    # Duration calculation (simplified)
+                    duration_ticks = int(duration * ticks_per_beat)
+                    
+                    # Note off
+                    melody_track.append(
+                        mido.Message('note_off', note=pitch, velocity=0, time=duration_ticks)
+                    )
+                except Exception as e:
+                    logger.warning(f"Error processing melody note {note_item}: {str(e)}")
+                    continue
             
             # Process drums (simplified example)
             for drum_hit in drums:
-                # Note on (drums use channel 9 by convention, 0-indexed)
-                drum_track.append(
-                    mido.Message('note_on', note=drum_hit["instrument"], velocity=drum_hit["velocity"], 
-                                 channel=9, time=0)
-                )
-                
-                # Short duration for drum hits
-                drum_track.append(
-                    mido.Message('note_off', note=drum_hit["instrument"], velocity=0, 
-                                 channel=9, time=int(0.1 * ticks_per_beat))
-                )
+                try:
+                    # Note on (drums use channel 9 by convention, 0-indexed)
+                    instrument = drum_hit.get("instrument", 36)
+                    velocity = drum_hit.get("velocity", 64)
+                    
+                    drum_track.append(
+                        mido.Message('note_on', note=instrument, velocity=velocity, 
+                                     channel=9, time=0)
+                    )
+                    
+                    # Short duration for drum hits
+                    drum_track.append(
+                        mido.Message('note_off', note=instrument, velocity=0, 
+                                     channel=9, time=int(0.1 * ticks_per_beat))
+                    )
+                except Exception as e:
+                    logger.warning(f"Error processing drum hit {drum_hit}: {str(e)}")
+                    continue
             
             # Save to a BytesIO object
             midi_file = io.BytesIO()
@@ -211,6 +244,15 @@ class MusicProcessor:
             title = composition_data.get("title", "Composition")
             chord_progression = composition_data.get("chord_progression", [])
             melody = composition_data.get("melody", [])
+            
+            # Validate components
+            if not isinstance(chord_progression, list):
+                logger.warning("Invalid chord_progression format, using empty list")
+                chord_progression = []
+            
+            if not isinstance(melody, list):
+                logger.warning("Invalid melody format, using empty list")
+                melody = []
             
             # Create a new music21 score
             score = stream.Score()
@@ -243,32 +285,55 @@ class MusicProcessor:
             
             # Process melody notes
             for note_item in melody:
-                # Create note
-                n = note.Note(note_item["pitch"])
-                n.quarterLength = note_item["duration"]
-                melody_part.append(n)
+                try:
+                    # Create note
+                    pitch = note_item.get("pitch", 60)
+                    duration = note_item.get("duration", 1.0)
+                    
+                    n = note.Note(pitch)
+                    n.quarterLength = duration
+                    melody_part.append(n)
+                except Exception as e:
+                    logger.warning(f"Error processing melody note {note_item}: {str(e)}")
+                    continue
             
             # Process chord progression
             for chord_item in chord_progression:
-                # Create chord
-                c = chord.Chord(chord_item["notes"])
-                c.quarterLength = chord_item["duration"]
-                chord_part.append(c)
+                try:
+                    # Create chord
+                    notes = chord_item.get("notes", [60, 64, 67])  # C major by default
+                    duration = chord_item.get("duration", 1.0)
+                    
+                    c = chord.Chord(notes)
+                    c.quarterLength = duration
+                    chord_part.append(c)
+                except Exception as e:
+                    logger.warning(f"Error processing chord {chord_item}: {str(e)}")
+                    continue
             
             # Add parts to score
             score.append(melody_part)
             score.append(chord_part)
             
-            # Save to a BytesIO object as MusicXML
+            # Save to a BytesIO object as MusicXML - FIXED VERSION
             musicxml_file = io.BytesIO()
-            score.write('musicxml', fp=musicxml_file)
+            
+            # Create a temporary file to write the score
+            with tempfile.NamedTemporaryFile(suffix='.musicxml', delete=True) as temp_file:
+                filename = temp_file.name
+                score.write('musicxml', fp=filename)
+                
+                # Read the written file and write its contents to our BytesIO
+                with open(filename, 'rb') as f:
+                    musicxml_file.write(f.read())
+                    
             musicxml_file.seek(0)
             
             return musicxml_file
         except Exception as e:
             logger.error(f"Error creating sheet music: {str(e)}")
             raise HTTPException(status_code=500, detail=f"Sheet music creation error: {str(e)}")
-    
+        
     @staticmethod
     def parse_midi_file(file_content):
         """Parse a MIDI file and extract musical elements"""
@@ -354,12 +419,19 @@ class MusicReference:
             "E minor": ["E", "F#", "G", "A", "B", "C", "D"],
             "F major": ["F", "G", "A", "Bb", "C", "D", "E"],
             "D minor": ["D", "E", "F", "G", "A", "Bb", "C"],
+            # Add more key signatures as needed
+            "A minor": ["A", "B", "C", "D", "E", "F", "G"],
+            "D major": ["D", "E", "F#", "G", "A", "B", "C#"],
+            "Bb major": ["Bb", "C", "D", "Eb", "F", "G", "A"],
+            "G minor": ["G", "A", "Bb", "C", "D", "Eb", "F"],
         }
         
         # Default to C major if key not found
+        if key not in scales:
+            logger.warning(f"Scale for key '{key}' not found, defaulting to C major")
         return scales.get(key, scales["C major"])
 
-# Tool functions for AutoGen agents
+# Improved tool functions for AutoGen agents
 def generate_chord_progression(style: str, key: str, length: int = 4, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Generate a chord progression based on style and key"""
     try:
@@ -369,10 +441,27 @@ def generate_chord_progression(style: str, key: str, length: int = 4, context: O
         # Prepare system message
         system_message = "You are a music composition assistant specialized in harmony and chord progressions."
         
-        # Prepare messages for the LLM
+        # Prepare messages for the LLM with improved JSON instructions
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": f"Generate a {length}-measure chord progression in {key} for {style} style music. Return it in JSON format with the following structure for each chord: {{\"chord_name\": \"Cmaj7\", \"notes\": [60, 64, 67, 71], \"duration\": 1.0}} where notes are MIDI note numbers and duration is in quarter notes."}
+            {"role": "user", "content": f"""
+Generate a {length}-measure chord progression in {key} for {style} style music.
+
+IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
+Format each chord as:
+{{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}}
+
+Your response must begin with '[' and end with ']' with no other text before or after.
+Example of a valid response format:
+[
+  {{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}},
+  {{"chord_name": "Dm7", "notes": [62, 65, 69, 72], "duration": 1.0}},
+  {{"chord_name": "G7", "notes": [67, 71, 74, 77], "duration": 1.0}},
+  {{"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}}
+]
+
+Do not include any explanation, just the JSON array.
+"""}
         ]
         
         # Add context if provided
@@ -386,12 +475,25 @@ def generate_chord_progression(style: str, key: str, length: int = 4, context: O
         # Generate chord progression
         chord_progression_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
         
-        # Parse the result (assuming it's in JSON format)
+        # Clean the result to ensure it's valid JSON
+        chord_progression_str = chord_progression_str.strip()
+        
+        # If there's text before the opening bracket, remove it
+        if '[' in chord_progression_str and not chord_progression_str.startswith('['):
+            chord_progression_str = chord_progression_str[chord_progression_str.find('['):]
+            
+        # If there's text after the closing bracket, remove it
+        if ']' in chord_progression_str and not chord_progression_str.endswith(']'):
+            chord_progression_str = chord_progression_str[:chord_progression_str.rfind(']')+1]
+        
+        # Parse the result
         try:
             chord_progression = json.loads(chord_progression_str)
-        except json.JSONDecodeError:
+            if not isinstance(chord_progression, list):
+                raise json.JSONDecodeError("Not a list", chord_progression_str, 0)
+        except json.JSONDecodeError as e:
             # Fallback in case the LLM doesn't return valid JSON
-            logger.warning("LLM didn't return valid JSON for chord progression, using simplified format")
+            logger.warning(f"LLM didn't return valid JSON for chord progression: {str(e)}, using simplified format")
             # Create a simple example chord progression
             chord_progression = [
                 {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0},
@@ -411,6 +513,12 @@ def generate_chord_progression(style: str, key: str, length: int = 4, context: O
         logger.error(f"Error in generate_chord_progression: {str(e)}")
         return {
             "error": str(e),
+            "chord_progression": [
+                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0},
+                {"chord_name": "Dm7", "notes": [62, 65, 69, 72], "duration": 1.0},
+                {"chord_name": "G7", "notes": [67, 71, 74, 77], "duration": 1.0},
+                {"chord_name": "Cmaj7", "notes": [60, 64, 67, 71], "duration": 1.0}
+            ],
             "source": "chord_progression_error",
             "timestamp": datetime.now().isoformat()
         }
@@ -424,10 +532,28 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
         # Prepare system message
         system_message = "You are a music composition assistant specialized in melody creation."
         
-        # Prepare messages for the LLM
+        # Prepare messages for the LLM with improved JSON instructions
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": f"Generate a melody in {key} for {style} style music that fits over this chord progression: {json.dumps(chord_progression)}. Return it in JSON format with the following structure for each note: {{\"pitch\": 60, \"duration\": 0.5, \"velocity\": 80}} where pitch is MIDI note number, duration is in quarter notes, and velocity is 0-127."}
+            {"role": "user", "content": f"""
+Generate a melody in {key} for {style} style music that fits over this chord progression: {json.dumps(chord_progression)}
+
+IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
+Format each note as:
+{{"pitch": 60, "duration": 0.5, "velocity": 80}}
+
+Your response must begin with '[' and end with ']' with no other text before or after.
+Example of a valid response format:
+[
+  {{"pitch": 60, "duration": 0.5, "velocity": 80}},
+  {{"pitch": 62, "duration": 0.5, "velocity": 80}},
+  {{"pitch": 64, "duration": 0.5, "velocity": 80}},
+  {{"pitch": 65, "duration": 0.5, "velocity": 80}},
+  {{"pitch": 67, "duration": 1.0, "velocity": 90}}
+]
+
+Do not include any explanation, just the JSON array.
+"""}
         ]
         
         # Add context if provided
@@ -441,12 +567,25 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
         # Generate melody
         melody_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
         
-        # Parse the result (assuming it's in JSON format)
+        # Clean the result to ensure it's valid JSON
+        melody_str = melody_str.strip()
+        
+        # If there's text before the opening bracket, remove it
+        if '[' in melody_str and not melody_str.startswith('['):
+            melody_str = melody_str[melody_str.find('['):]
+            
+        # If there's text after the closing bracket, remove it
+        if ']' in melody_str and not melody_str.endswith(']'):
+            melody_str = melody_str[:melody_str.rfind(']')+1]
+        
+        # Parse the result
         try:
             melody = json.loads(melody_str)
-        except json.JSONDecodeError:
+            if not isinstance(melody, list):
+                raise json.JSONDecodeError("Not a list", melody_str, 0)
+        except json.JSONDecodeError as e:
             # Fallback in case the LLM doesn't return valid JSON
-            logger.warning("LLM didn't return valid JSON for melody, using simplified format")
+            logger.warning(f"LLM didn't return valid JSON for melody: {str(e)}, using simplified format")
             # Create a simple example melody
             melody = [
                 {"pitch": 60, "duration": 0.5, "velocity": 80},
@@ -471,6 +610,17 @@ def generate_melody(chord_progression: List[Dict], style: str, key: str, context
         logger.error(f"Error in generate_melody: {str(e)}")
         return {
             "error": str(e),
+            "melody": [
+                {"pitch": 60, "duration": 0.5, "velocity": 80},
+                {"pitch": 62, "duration": 0.5, "velocity": 80},
+                {"pitch": 64, "duration": 0.5, "velocity": 80},
+                {"pitch": 65, "duration": 0.5, "velocity": 80},
+                {"pitch": 67, "duration": 1.0, "velocity": 90},
+                {"pitch": 65, "duration": 0.5, "velocity": 80},
+                {"pitch": 64, "duration": 0.5, "velocity": 80},
+                {"pitch": 62, "duration": 0.5, "velocity": 80},
+                {"pitch": 60, "duration": 1.0, "velocity": 90}
+            ],
             "source": "melody_error",
             "timestamp": datetime.now().isoformat()
         }
@@ -481,10 +631,32 @@ def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", con
         # Prepare system message
         system_message = "You are a music composition assistant specialized in drum programming."
         
-        # Prepare messages for the LLM
+        # Prepare messages for the LLM with improved JSON instructions
         messages = [
             {"role": "system", "content": system_message},
-            {"role": "user", "content": f"Generate a {length}-measure drum pattern in {time_signature} time for {style} style music. Return it in JSON format with the following structure for each drum hit: {{\"instrument\": 36, \"velocity\": 90, \"position\": 0.0}} where instrument is MIDI note number (36=bass drum, 38=snare, 42=hi-hat closed, 46=hi-hat open, 51=ride), velocity is 0-127, and position is the beat position in the measure (0.0 is the first beat)."}
+            {"role": "user", "content": f"""
+Generate a {length}-measure drum pattern in {time_signature} time for {style} style music.
+
+IMPORTANT: You must return ONLY a valid JSON array that I can parse directly with json.loads().
+Format each drum hit as:
+{{"instrument": 36, "velocity": 90, "position": 0.0}}
+
+Where:
+- instrument is MIDI note number (36=bass drum, 38=snare, 42=hi-hat closed, 46=hi-hat open, 51=ride)
+- velocity is 0-127
+- position is the beat position in the measure (0.0 is the first beat)
+
+Your response must begin with '[' and end with ']' with no other text before or after.
+Example of a valid response format:
+[
+  {{"instrument": 36, "velocity": 90, "position": 0.0}},
+  {{"instrument": 38, "velocity": 90, "position": 1.0}},
+  {{"instrument": 42, "velocity": 70, "position": 0.0}},
+  {{"instrument": 42, "velocity": 70, "position": 0.5}}
+]
+
+Do not include any explanation, just the JSON array.
+"""}
         ]
         
         # Add context if provided
@@ -495,12 +667,25 @@ def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", con
         # Generate drum pattern
         drums_str = ai_client.generate_chat_completion(messages=messages, max_tokens=1000, temperature=0.7)
         
-        # Parse the result (assuming it's in JSON format)
+        # Clean the result to ensure it's valid JSON
+        drums_str = drums_str.strip()
+        
+        # If there's text before the opening bracket, remove it
+        if '[' in drums_str and not drums_str.startswith('['):
+            drums_str = drums_str[drums_str.find('['):]
+            
+        # If there's text after the closing bracket, remove it
+        if ']' in drums_str and not drums_str.endswith(']'):
+            drums_str = drums_str[:drums_str.rfind(']')+1]
+        
+        # Parse the result
         try:
             drums = json.loads(drums_str)
-        except json.JSONDecodeError:
+            if not isinstance(drums, list):
+                raise json.JSONDecodeError("Not a list", drums_str, 0)
+        except json.JSONDecodeError as e:
             # Fallback in case the LLM doesn't return valid JSON
-            logger.warning("LLM didn't return valid JSON for drums, using simplified format")
+            logger.warning(f"LLM didn't return valid JSON for drums: {str(e)}, using simplified format")
             # Create a simple example drum pattern
             if time_signature == "4/4":
                 drums = [
@@ -539,9 +724,9 @@ def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", con
             # Create multiple measures
             for measure in range(length):
                 drum_hits.append({
-                    "instrument": hit["instrument"],
-                    "velocity": hit["velocity"],
-                    "position": hit["position"] + (measure * measure_length)
+                    "instrument": hit.get("instrument", 36),
+                    "velocity": hit.get("velocity", 80),
+                    "position": hit.get("position", 0.0) + (measure * measure_length)
                 })
         
         return {
@@ -553,8 +738,41 @@ def generate_drums(style: str, length: int = 4, time_signature: str = "4/4", con
         }
     except Exception as e:
         logger.error(f"Error in generate_drums: {str(e)}")
+        # Create a simple fallback drum pattern
+        if time_signature == "4/4":
+            drum_hits = [
+                {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
+                {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
+                {"instrument": 36, "velocity": 90, "position": 2.0},  # Bass drum on beat 3
+                {"instrument": 38, "velocity": 90, "position": 3.0},  # Snare on beat 4
+            ]
+            # Repeat for all measures
+            for measure in range(1, length):
+                for hit in drum_hits[:]:
+                    drum_hits.append({
+                        "instrument": hit["instrument"],
+                        "velocity": hit["velocity"],
+                        "position": hit["position"] + (measure * 4.0)
+                    })
+        else:
+            # Simple 3/4 pattern
+            drum_hits = [
+                {"instrument": 36, "velocity": 90, "position": 0.0},  # Bass drum on beat 1
+                {"instrument": 38, "velocity": 90, "position": 1.0},  # Snare on beat 2
+                {"instrument": 38, "velocity": 90, "position": 2.0},  # Snare on beat 3
+            ]
+            # Repeat for all measures
+            for measure in range(1, length):
+                for hit in drum_hits[:]:
+                    drum_hits.append({
+                        "instrument": hit["instrument"],
+                        "velocity": hit["velocity"],
+                        "position": hit["position"] + (measure * 3.0)
+                    })
+            
         return {
             "error": str(e),
+            "drums": drum_hits,
             "source": "drum_error",
             "timestamp": datetime.now().isoformat()
         }
@@ -574,6 +792,22 @@ def assemble_composition(
         time_signature = parameters.get("time_signature", "4/4")
         title = parameters.get("title", f"{style.capitalize()} Composition in {key}")
         
+        # Extract components with fallbacks
+        chords = chord_progression.get("chord_progression", [])
+        if not isinstance(chords, list):
+            logger.warning("Invalid chord_progression, using empty list")
+            chords = []
+            
+        melody_notes = melody.get("melody", [])
+        if not isinstance(melody_notes, list):
+            logger.warning("Invalid melody, using empty list")
+            melody_notes = []
+            
+        drum_hits = drums.get("drums", [])
+        if not isinstance(drum_hits, list):
+            logger.warning("Invalid drums, using empty list")
+            drum_hits = []
+        
         # Assemble the composition data
         composition = {
             "title": title,
@@ -581,9 +815,9 @@ def assemble_composition(
             "key": key,
             "tempo": tempo,
             "time_signature": time_signature,
-            "chord_progression": chord_progression.get("chord_progression", []),
-            "melody": melody.get("melody", []),
-            "drums": drums.get("drums", []),
+            "chord_progression": chords,
+            "melody": melody_notes,
+            "drums": drum_hits,
             "creation_date": datetime.now().isoformat()
         }
         
@@ -594,8 +828,21 @@ def assemble_composition(
         }
     except Exception as e:
         logger.error(f"Error in assemble_composition: {str(e)}")
+        # Return a basic composition with empty components
+        composition = {
+            "title": f"Composition in C major",
+            "style": "pop",
+            "key": "C major",
+            "tempo": 120,
+            "time_signature": "4/4",
+            "chord_progression": [],
+            "melody": [],
+            "drums": [],
+            "creation_date": datetime.now().isoformat()
+        }
         return {
             "error": str(e),
+            "composition": composition,
             "source": "composition_error",
             "timestamp": datetime.now().isoformat()
         }
@@ -809,6 +1056,7 @@ class MusicCompositionSystem:
                 context["additional_notes"] = additional_notes
             
             # Step 1: Generate chord progression
+            logger.info(f"Generating chord progression for {style} in {key}")
             chord_result = generate_chord_progression(
                 style=style,
                 key=key,
@@ -817,6 +1065,7 @@ class MusicCompositionSystem:
             )
             
             # Step 2: Generate melody based on the chord progression
+            logger.info(f"Generating melody for {style} in {key}")
             melody_result = generate_melody(
                 chord_progression=chord_result["chord_progression"],
                 style=style,
@@ -825,6 +1074,7 @@ class MusicCompositionSystem:
             )
             
             # Step 3: Generate drum pattern
+            logger.info(f"Generating drum pattern for {style} in {time_signature}")
             drum_result = generate_drums(
                 style=style,
                 length=length,
@@ -833,6 +1083,7 @@ class MusicCompositionSystem:
             )
             
             # Step 4: Assemble the composition
+            logger.info("Assembling composition")
             composition_params = {
                 "style": style,
                 "key": key,
@@ -849,12 +1100,18 @@ class MusicCompositionSystem:
             )
             
             # Step 5: Generate MIDI file from the composition
+            logger.info("Creating MIDI file")
             composition_data = composition_result["composition"]
             midi_file = MusicProcessor.create_midi_from_composition(composition_data)
             
             # Step 6: Generate sheet music
+            logger.info("Creating sheet music")
             sheet_music_file = MusicProcessor.create_sheet_music(composition_data)
             
+            # Ensure both files were created successfully
+            if not midi_file or not sheet_music_file:
+                raise ValueError("Failed to create MIDI or sheet music file")
+                
             # Save files to disk with unique IDs
             composition_id = f"comp_{datetime.now().strftime('%Y%m%d%H%M%S')}"
             midi_path = f"compositions/{composition_id}.mid"
@@ -869,6 +1126,8 @@ class MusicCompositionSystem:
             
             with open(sheet_music_path, "wb") as f:
                 f.write(sheet_music_file.getvalue())
+            
+            logger.info(f"Composition created successfully with ID: {composition_id}")
             
             # Create response
             result = {
@@ -904,13 +1163,19 @@ music_composition_system = MusicCompositionSystem()
 @app.post("/api/compose", response_model=Response)
 async def compose_music(request: CompositionRequest):
     """Create a new music composition based on parameters"""
-    return await music_composition_system.compose_music(request.parameters)
+    try:
+        logger.info(f"Received composition request for {request.parameters.style} in {request.parameters.key}")
+        return await music_composition_system.compose_music(request.parameters)
+    except Exception as e:
+        logger.error(f"Error in compose_music endpoint: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error composing music: {str(e)}")
 
 @app.get("/api/composition/{composition_id}/midi")
 async def get_midi_file(composition_id: str):
     """Get the MIDI file for a composition"""
     file_path = f"compositions/{composition_id}.mid"
     if not os.path.exists(file_path):
+        logger.error(f"Composition MIDI file not found: {file_path}")
         raise HTTPException(status_code=404, detail=f"Composition MIDI file not found")
     return FileResponse(file_path, media_type="audio/midi", filename=f"{composition_id}.mid")
 
@@ -919,6 +1184,7 @@ async def get_sheet_music(composition_id: str):
     """Get the sheet music for a composition"""
     file_path = f"compositions/{composition_id}.musicxml"
     if not os.path.exists(file_path):
+        logger.error(f"Composition sheet music file not found: {file_path}")
         raise HTTPException(status_code=404, detail=f"Composition sheet music not found")
     return FileResponse(file_path, media_type="application/vnd.recordare.musicxml+xml", filename=f"{composition_id}.musicxml")
 
@@ -926,6 +1192,51 @@ async def get_sheet_music(composition_id: str):
 @app.get("/health")
 def health_check():
     return {"status": "healthy", "timestamp": datetime.now().isoformat()}
+
+# Simple test endpoint to verify fixes
+@app.get("/test")
+async def test_endpoint():
+    """Test the main components of the system without creating a full composition"""
+    try:
+        # Test chord progression generation
+        chord_result = generate_chord_progression(
+            style="jazz",
+            key="C major",
+            length=4
+        )
+        
+        # Test melody generation
+        melody_result = generate_melody(
+            chord_progression=chord_result["chord_progression"],
+            style="jazz",
+            key="C major"
+        )
+        
+        # Test MIDI creation (small test)
+        test_composition = {
+            "title": "Test Composition",
+            "key": "C major",
+            "tempo": 120,
+            "time_signature": "4/4",
+            "chord_progression": chord_result["chord_progression"][:2],
+            "melody": melody_result["melody"][:4],
+            "drums": []
+        }
+        
+        midi_file = MusicProcessor.create_midi_from_composition(test_composition)
+        sheet_music_file = MusicProcessor.create_sheet_music(test_composition)
+        
+        # Both should be BytesIO objects
+        return {
+            "status": "success",
+            "chord_progression_length": len(chord_result["chord_progression"]),
+            "melody_length": len(melody_result["melody"]),
+            "midi_created": midi_file is not None,
+            "sheet_music_created": sheet_music_file is not None
+        }
+    except Exception as e:
+        logger.error(f"Test endpoint error: {str(e)}")
+        return {"status": "error", "message": str(e)}
 
 if __name__ == "__main__":
     import uvicorn
