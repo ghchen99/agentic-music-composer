@@ -2,16 +2,13 @@
 
 A comprehensive multi-agent AI system for creating original songs with chord progressions, lyrics, melodies, and instrumental arrangements.
 
-<img src="./assets/songform.jpg" alt="Song request interface" width={500} height={300} />
+<img src="./assets/songform.png" alt="Song request interface" width={500} height={300} />
 
 ## 🎵 Project Overview
 
 This project combines advanced AI agents with music theory and MIDI orchestration to create original songs based on simple human inputs. Using Azure OpenAI and the AutoGen framework, specialised agents collaborate to handle different aspects of the songwriting process, resulting in complete musical compositions.
 
-<audio controls>
-  <source src="./songs/Happy_Days/Happy_Days.mp3" type="audio/mpeg">
-  Your browser does not support the audio element.
-</audio>
+[Listen to Happy Days here!](./songs/Happy_Days/Happy_Days.mp3)
 
 ## 🤖 Agentic AI System
 

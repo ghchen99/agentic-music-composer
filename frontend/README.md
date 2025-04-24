@@ -18,7 +18,7 @@ The Songwriting Assistant Frontend provides an intuitive user interface for inte
 
 ## 🖼️ Screenshots
 
-<img src="./assets/songform.jpg" alt="Song request interface" width={500} height={300} />
+<img src="./assets/songform.png" alt="Song request interface" width={500} height={300} />
 
 ## 🚀 Getting Started
 
