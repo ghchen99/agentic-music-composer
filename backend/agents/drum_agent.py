@@ -104,7 +104,7 @@ def _determine_style_with_ai(tempo: int, context: Optional[Dict[str, Any]]) -> s
         - hip_hop: Hip-hop beats
         - r_and_b: R&B groove patterns
         
-        Respond with ONLY the style name, nothing else."""
+        IMPORTANT: Respond with ONLY the style name in lowercase, no explanation or additional text."""
         
         # Prepare messages for the LLM
         inspirations_str = ", ".join(inspirations) if inspirations else ""
@@ -117,15 +117,19 @@ def _determine_style_with_ai(tempo: int, context: Optional[Dict[str, Any]]) -> s
                                         f"Inspirations: {inspirations_str}"}
         ]
         
+        # Add a final reminder to return just the style name
+        messages.append({"role": "user", "content": "Remember to respond with ONLY the style name, nothing else."})
+        
         # Get AI recommendation
         style_response = ai_client.generate_chat_completion(
             messages=messages,
             max_tokens=50,
-            temperature=0.3  # Lower temperature for more deterministic results
+            temperature=0.3,  # Lower temperature for more deterministic results
+            structured_output=True  # Signal that we want structured output
         )
         
         # Clean and normalize the response
-        style = style_response.strip().lower()
+        style = style_response.strip().lower().replace(" ", "_").replace("-", "_")
         
         # Extract just the style name if there's additional text
         for available_style in AVAILABLE_STYLES:

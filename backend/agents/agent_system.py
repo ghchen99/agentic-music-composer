@@ -52,6 +52,7 @@ class SongwritingAgentSystem:
             4. DrumAgent - For creating drum patterns
             
             Determine which specialist should handle the query and route it appropriately.
+            When responding, provide ONLY the name of the specialist in a JSON format: {"specialist": "SpecialistName"}
             """,
             llm_config={
                 **llm_config,
@@ -82,7 +83,12 @@ class SongwritingAgentSystem:
         # Create specialist agents with their tools
         self.chord_progression_agent = AssistantAgent(
             name="ChordProgressionAgent",
-            system_message="You are a music theory expert specializing in chord progressions. You can generate chord progressions for verse and chorus based on song descriptions and musical inspirations.",
+            system_message="""You are a music theory expert specializing in chord progressions. 
+            You can generate chord progressions for verse and chorus based on song descriptions and musical inspirations.
+            
+            When responding, provide your output in structured JSON format:
+            {"verse": ["C", "G", "Am", "F"], "chorus": ["F", "C", "G", "Am"]}
+            """,
             llm_config={
                 **llm_config,
                 "functions": [
@@ -93,7 +99,13 @@ class SongwritingAgentSystem:
         
         self.lyrics_agent = AssistantAgent(
             name="LyricsAgent",
-            system_message="You are a lyricist specializing in songwriting. You can create lyrics for verse and chorus based on song descriptions, musical inspirations, and chord progressions.",
+            system_message="""You are a lyricist specializing in songwriting. 
+            You can create lyrics for verse and chorus based on song descriptions, musical inspirations, and chord progressions.
+            
+            When responding, provide your output in structured JSON format:
+            {"verse": "Verse lyrics line 1\\nVerse lyrics line 2\\nVerse lyrics line 3\\nVerse lyrics line 4", 
+             "chorus": "Chorus lyrics line 1\\nChorus lyrics line 2\\nChorus lyrics line 3\\nChorus lyrics line 4"}
+            """,
             llm_config={
                 **llm_config,
                 "functions": [
@@ -104,7 +116,11 @@ class SongwritingAgentSystem:
         
         self.melody_agent = AssistantAgent(
             name="MelodyAgent",
-            system_message="You are a melody composer specializing in songwriting. You can create melodies for lyrics based on chord progressions and lyrics.",
+            system_message="""You are a melody composer specializing in songwriting. 
+            You can create melodies for lyrics based on chord progressions and lyrics.
+            
+            When responding, provide your output in structured JSON format with detailed note information.
+            """,
             llm_config={
                 **llm_config,
                 "functions": [
@@ -115,7 +131,11 @@ class SongwritingAgentSystem:
 
         self.drum_agent = AssistantAgent(
             name="DrumAgent",
-            system_message="You are a drum programming expert. You can create drum patterns in various styles for songs.",
+            system_message="""You are a drum programming expert. 
+            You can create drum patterns in various styles for songs.
+            
+            When responding, provide your output in a single-word format specifying just the drum style.
+            """,
             llm_config={
                 **llm_config,
                 "functions": [
@@ -336,22 +356,23 @@ class SongwritingAgentSystem:
             drum_result = generate_drum_pattern(
                 tempo=tempo, 
                 style=drum_style, 
-                bars=8,  # 8 bars by default
+                bars=16,  # 16 bars for the full verse+chorus pattern
                 context=context
             )
             
             if "error" in drum_result:
                 logger.warning(f"Error generating drum pattern: {drum_result['error']}, continuing with basic pattern")
-                # Continue with basic pattern if there's an error
+                drum_style = "basic"
             else:
                 logger.info(f"Generated drum pattern with style: {drum_result.get('style', 'basic')}")
+                drum_style = drum_result.get('style', 'basic')
             
             # Step 5: Generate MIDI file
             if not title:
                 title = f"Song about {description[:20]}"
             
             logger.info(f"Generating MIDI file with title: {title}, tempo: {tempo}...")
-            midi_path = MusicProcessor.generate_midi_file(chords, melody, title, tempo)
+            midi_path = MusicProcessor.generate_midi_file(chords, melody, title, tempo, drum_style)
             
             # Prepare result
             result = {
@@ -365,7 +386,7 @@ class SongwritingAgentSystem:
                     "verse_notes": len(melody["verse"]),
                     "chorus_notes": len(melody["chorus"])
                 },
-                "drum_style": drum_result.get("style", "basic") if "error" not in drum_result else "basic",
+                "drum_style": drum_style,
                 "midi_file": midi_path
             }
             

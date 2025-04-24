@@ -1,191 +1,162 @@
-# Music Composition Agentic System
+# AI Music Composition Assistant 🎵
 
-## Overview
+A powerful backend system for generating original music using AI agents. This system uses Azure OpenAI and AutoGen to create chord progressions, lyrics, melodies, and drum patterns, combining them into complete MIDI songs.
 
-The Music Composition Agentic System is a specialized backend that leverages AI agents to create original musical compositions. Each agent specializes in a different aspect of music creation, working together in a coordinated environment to produce complete compositions that can be exported as both MIDI files and sheet music.
+## 🌟 Features
 
-## Architecture
+- **Multi-Agent Architecture**: Specialized agents for different aspects of songwriting
+- **Complete Song Generation**: Creates chord progressions, lyrics, melodies and drum patterns
+- **Multiple Drum Styles**: Support for various musical styles (basic, four_on_floor, trap, latin, pop, etc.)
+- **MIDI File Output**: Generates professional-quality MIDI files with multiple instrument tracks
+- **RESTful API**: Easy integration with front-end applications
 
-### Agent Environment
+## 📋 System Components
 
-The system's environment is built on two primary music processing libraries:
-
-1. **music21**: A Python toolkit for computer-aided musicology that provides an object-oriented representation of musical elements like notes, chords, measures, and time signatures.
-
-2. **mido**: A library for working with MIDI messages and files, allowing for the creation and manipulation of MIDI data.
-
-These libraries define the "world" in which the agents operate, providing them with the tools to create and manipulate musical elements programmatically.
-
-### Agent Specializations
-
-The system employs specialized agents that focus on specific aspects of music composition:
-
-1. **ChordSpecialist Agent**:
-   - Generates chord progressions based on style, key, and length parameters
-   - Works with harmony principles specific to different musical styles
-   - Creates progressions as sequences of chords with MIDI note numbers and durations
-
-2. **MelodySpecialist Agent**:
-   - Creates melodies that fit over chord progressions
-   - Ensures melodies are appropriate for the selected style and key
-   - Outputs sequences of notes with pitch, duration, and velocity information
-
-3. **DrumSpecialist Agent**:
-   - Generates rhythm patterns based on style and time signature
-   - Creates appropriate drum patterns for various musical genres
-   - Outputs drum hits with instrument ID, velocity, and position information
-
-4. **CompositionAssembler Agent**:
-   - Integrates the outputs from all specialist agents
-   - Ensures musical coherence between components
-   - Prepares the final composition data for export
-
-### How Agents Work Together
-
-1. The process begins with a composition request specifying style, key, tempo, and other parameters.
-2. Each specialist agent is invoked in sequence:
-   - ChordSpecialist generates the harmonic foundation
-   - MelodySpecialist creates a melody that aligns with the chord progression
-   - DrumSpecialist adds rhythmic elements appropriate for the style
-3. The CompositionAssembler combines these elements into a coherent composition
-4. The music is exported as both MIDI and MusicXML formats using the environment libraries
-
-The agents utilize an Azure OpenAI language model to generate musical content based on their specialized knowledge, then format this content into structured musical data that can be processed by the music21 and mido libraries.
-
-## Technical Implementation
-
-### Built With
-
-- **FastAPI**: Web framework for the API endpoints
-- **AutoGen**: Framework for building and orchestrating LLM-powered agents
-- **Azure OpenAI**: Language models for the agents' decision-making
-- **music21**: Music notation and theory processing
-- **mido**: MIDI file creation and manipulation
-- **Python 3.8+**: Core programming language
-
-### Core Components
-
-- **Music Processor**: Handles the conversion between composition data and actual music files
-- **Agent System**: Manages the specialist agents and their interactions
-- **API Layer**: Exposes endpoints for composition requests and file retrieval
-
-## API Usage
-
-### Composition Request
-
-**Endpoint**: `POST /api/compose`
-
-**Input Format**:
-```json
-{
-  "parameters": {
-    "style": "jazz",         // Musical style
-    "key": "C minor",        // Musical key
-    "tempo": 110,            // BPM
-    "length": 16,            // Number of measures
-    "time_signature": "4/4", // Time signature
-    "additional_notes": "Create a cool jazz progression with extended chords"
-  }
-}
+```
+backend/
+├── agents/               # Specialized AI agents
+│   ├── agent_system.py   # Main agent orchestration
+│   ├── chord_agent.py    # Chord progression generation
+│   ├── drum_agent.py     # Drum pattern generation
+│   ├── lyrics_agent.py   # Song lyrics generation
+│   └── melody_agent.py   # Melody creation
+├── config/               # Configuration settings
+├── core/                 # Core functionality
+│   ├── azure_client.py   # Azure OpenAI integration
+│   └── music_processor.py # MIDI and music generation
+├── models/               # Data models
+├── services/             # Business logic services
+├── utils/                # Utility functions
+│   ├── midi_utils.py     # MIDI manipulation utilities
+│   └── music_theory.py   # Music theory helpers
+├── main.py               # FastAPI application
+└── requirements.txt      # Dependencies
 ```
 
-**Output Format**:
-```json
-{
-  "result": {
-    "composition_id": "comp_20250422123456",
-    "title": "Jazz Composition in C minor",
-    "style": "jazz",
-    "key": "C minor",
-    "tempo": 110,
-    "time_signature": "4/4",
-    "length": 16,
-    "midi_file": "compositions/comp_20250422123456.mid",
-    "sheet_music_file": "compositions/comp_20250422123456.musicxml",
-    "composition_data": {
-      // Detailed composition structure
-    }
-  },
-  "source": "music_composition_system",
-  "timestamp": "2025-04-22T12:34:56.789012"
-}
-```
+## 🚀 Getting Started
 
-### Retrieving Files
+### Prerequisites
 
-**MIDI File**: `GET /api/composition/{composition_id}/midi`
-**Sheet Music**: `GET /api/composition/{composition_id}/sheet`
+- Python 3.8+
+- Azure OpenAI API key and endpoint
+- Dependencies from requirements.txt
 
-## Installation and Setup
+### Installation
 
-1. Clone the repository
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/ai-songwriting-assistant.git
+   cd ai-songwriting-assistant
+   ```
+
+2. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+3. Set up environment variables:
+   Create a `.env` file in the root directory with the following:
+   ```
+   AZURE_OPENAI_API_KEY=your_api_key
+   AZURE_OPENAI_ENDPOINT=your_endpoint
+   API_VERSION=your_api_version
+   MODEL_NAME=your_model_name
+   ```
+
+### Running the API
+
+Start the FastAPI server:
 ```bash
-git clone https://github.com/your-org/music-composition-agents.git
-cd music-composition-agents
+uvicorn backend.main:app --reload
 ```
 
-2. Install dependencies
-```bash
-pip install -r requirements.txt
-```
+The API will be available at http://localhost:8000
 
-3. Set up environment variables in a `.env` file:
-```
-AZURE_OPENAI_API_KEY=your_api_key
-AZURE_OPENAI_ENDPOINT=your_endpoint
-MODEL_NAME=your_model_name
-API_VERSION=your_api_version
-```
+## 🎹 API Endpoints
 
-4. Run the application:
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/create-song` | POST | Create a complete song |
+| `/api/generate-chords` | POST | Generate chord progressions |
+| `/api/generate-lyrics` | POST | Generate song lyrics |
+| `/api/generate-melody` | POST | Generate melody based on lyrics and chords |
+| `/api/generate-drums` | POST | Generate drum patterns |
+| `/api/songs` | GET | List all generated songs |
+| `/api/songs/{song_title}` | GET | Get song details |
+| `/api/download/{song_title}` | GET | Download MIDI file |
+| `/health` | GET | API health check |
 
-## Example Usage
+## 📝 Example Usage
 
-### Python Example
+### Create a complete song
+
 ```python
 import requests
 import json
 
-url = "http://localhost:8000/api/compose"
+url = "http://localhost:8000/api/create-song"
+payload = {
+    "description": "An uplifting pop song about perseverance and growth",
+    "inspirations": ["Coldplay", "OneRepublic", "Imagine Dragons"],
+    "title": "Rising Higher",
+    "tempo": 120
+}
 headers = {"Content-Type": "application/json"}
 
-payload = {
-  "parameters": {
-    "style": "classical",
-    "key": "F major",
-    "tempo": 170,
-    "length": 32,
-    "time_signature": "3/4",
-    "additional_notes": "Viennese waltz style with light, elegant feel"
-  }
-}
-
-response = requests.post(url, headers=headers, data=json.dumps(payload))
+response = requests.post(url, data=json.dumps(payload), headers=headers)
 print(response.json())
-
-# Get the composition ID from the response
-composition_id = response.json()["result"]["composition_id"]
-
-# Download MIDI file
-midi_response = requests.get(f"http://localhost:8000/api/composition/{composition_id}/midi")
-with open(f"{composition_id}.mid", "wb") as f:
-    f.write(midi_response.content)
-
-# Download Sheet Music
-sheet_response = requests.get(f"http://localhost:8000/api/composition/{composition_id}/sheet")
-with open(f"{composition_id}.musicxml", "wb") as f:
-    f.write(sheet_response.content)
 ```
 
-## Limitations and Future Work
+## 🥁 Available Drum Styles
 
-- The current system focuses on basic musical elements; future versions could add additional specialists for basslines, countermelodies, and arrangements
-- Style-specific knowledge could be expanded for more authentic genre representations
-- Integration with audio synthesis for direct playback could enhance the user experience
+- `basic`: Standard rock/pop pattern
+- `four_on_floor`: Classic disco/house with kick on every beat
+- `trap`: Modern trap beats with rolling hi-hats
+- `latin`: Latin percussion patterns
+- `pop`: Contemporary pop patterns
+- `rock`: Rock drumming patterns
+- `jazz`: Jazz swing patterns
+- `electronic`: Electronic/EDM patterns
+- `hip_hop`: Hip-hop beats
+- `r_and_b`: R&B groove patterns
 
-## License
+## 🧩 Architecture
+
+This system uses a multi-agent approach where specialized agents handle different aspects of the songwriting process:
+
+1. **RouterAgent**: Determines which specialist should handle user queries
+2. **ChordProgressionAgent**: Generates chord progressions for verse and chorus
+3. **LyricsAgent**: Creates lyrics based on song theme and chord progressions
+4. **MelodyAgent**: Composes melodies that fit the lyrics and chords
+5. **DrumAgent**: Creates appropriate drum patterns for the song
+
+The agents collaborate to create a complete song, which is then processed into a MIDI file with multiple tracks:
+- Piano (chords)
+- Melody (with lyrics annotations)
+- Strings (pad)
+- Drums
+
+## 📥 Output Format
+
+The system generates:
+
+1. A MIDI file with multiple tracks
+2. A JSON file with song metadata
+
+Example output directory structure:
+```
+songs/
+└── Rising_Higher/
+    ├── Rising_Higher.mid
+    └── song_info.json
+```
+
+## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 🙏 Acknowledgments
+
+- Azure OpenAI for the language model capabilities
+- AutoGen for the agent framework
+- music21 and mido for music theory and MIDI processing

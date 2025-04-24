@@ -176,6 +176,3 @@ cython_debug/
 # Snapshot files
 snapshot.py
 snapshot.txt
-
-# Composition files
-songs/
