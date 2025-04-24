@@ -263,8 +263,20 @@ class SongwritingAgentSystem:
         
         return function_map
 
-    async def create_song(self, description: str, inspirations: List[str], title: Optional[str] = None, tempo: int = 120) -> Response:
-        """Create a complete song using the agent system"""
+    async def create_song(self, description: str, inspirations: List[str], title: Optional[str] = None, 
+                        tempo: int = 120, drum_style: Optional[str] = None) -> Response:
+        """Create a complete song using the agent system
+        
+        Args:
+            description: Description of the song's theme and mood
+            inspirations: List of musical artists that inspire this song
+            title: Optional title for the song (generated from description if not provided)
+            tempo: Tempo in BPM
+            drum_style: Optional drum style to use (e.g., "basic", "four_on_floor", "trap", "latin", "pop")
+        
+        Returns:
+            Response object containing the generated song details or error information
+        """
         try:
             # Step 1: Generate chord progressions
             logger.info("Generating chord progressions...")
@@ -308,7 +320,33 @@ class SongwritingAgentSystem:
             melody = melody_result["melody"]
             logger.info(f"Generated melody for verse and chorus")
             
-            # Step 4: Generate MIDI file
+            # Step 4: Generate drum pattern
+            logger.info(f"Generating drum pattern with style: {drum_style or 'auto-determined'}...")
+            
+            # If no drum style specified, determine it based on description and inspirations
+            if not drum_style:
+                # Use the context to help the drum agent determine the style
+                context = {
+                    "description": description,
+                    "inspirations": inspirations
+                }
+            else:
+                context = None
+                
+            drum_result = generate_drum_pattern(
+                tempo=tempo, 
+                style=drum_style, 
+                bars=8,  # 8 bars by default
+                context=context
+            )
+            
+            if "error" in drum_result:
+                logger.warning(f"Error generating drum pattern: {drum_result['error']}, continuing with basic pattern")
+                # Continue with basic pattern if there's an error
+            else:
+                logger.info(f"Generated drum pattern with style: {drum_result.get('style', 'basic')}")
+            
+            # Step 5: Generate MIDI file
             if not title:
                 title = f"Song about {description[:20]}"
             
@@ -327,6 +365,7 @@ class SongwritingAgentSystem:
                     "verse_notes": len(melody["verse"]),
                     "chorus_notes": len(melody["chorus"])
                 },
+                "drum_style": drum_result.get("style", "basic") if "error" not in drum_result else "basic",
                 "midi_file": midi_path
             }
             

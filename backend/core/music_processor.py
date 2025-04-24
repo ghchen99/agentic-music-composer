@@ -13,6 +13,7 @@ import mido
 from mido import Message, MidiFile, MidiTrack
 
 from config.settings import SONGS_DIR, TICKS_PER_BEAT, DEFAULT_TEMPO
+from utils.midi_utils import create_drum_pattern  # Import the shared implementation
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -44,10 +45,21 @@ class MusicProcessor:
             logger.error(f"Error parsing note {note_info}: {str(e)}")
             # Fallback to a quarter note C
             return music21.note.Note('C4', type='quarter')
-    
+
     @staticmethod
-    def generate_midi_file(chords, melody, title="Song", tempo=DEFAULT_TEMPO):
-        """Generate a MIDI file with piano, drums, strings, and lyrics annotation"""
+    def generate_midi_file(chords, melody, title="Song", tempo=DEFAULT_TEMPO, drum_style="basic"):
+        """Generate a MIDI file with piano, drums, strings, and lyrics annotation
+        
+        Args:
+            chords: Dictionary with verse and chorus chord progressions
+            melody: Dictionary with verse and chorus melodies
+            title: Title of the song
+            tempo: Tempo in BPM
+            drum_style: Style of drum pattern to use
+            
+        Returns:
+            Path to the generated MIDI file
+        """
         try:
             # Create a MIDI file with tracks: tempo/time sig, piano (chords), melody, strings, drums
             mid = MidiFile(type=1)
@@ -120,9 +132,11 @@ class MusicProcessor:
                     melody_track.append(Message('note_on', note=midi_note, velocity=80, time=time))
                     time = 0
                     
-                    # Add lyrics if there's a syllable
+                    # Add lyrics if there's a syllable - make sure it's ASCII-compatible
                     if syllable:
-                        melody_track.append(mido.MetaMessage('lyrics', text=syllable, time=0))
+                        # Convert non-ASCII characters to ASCII approximations or remove them
+                        ascii_syllable = syllable.encode('ascii', 'replace').decode('ascii')
+                        melody_track.append(mido.MetaMessage('lyrics', text=ascii_syllable, time=0))
                     
                     # Add note_off
                     melody_track.append(Message('note_off', note=midi_note, velocity=0, time=duration_ticks))
@@ -157,15 +171,18 @@ class MusicProcessor:
                         strings_track.append(Message('note_off', note=midi_note, velocity=0, time=time))
                         time = 0
             
-            # Add drums track using the add_drums helper method
-            drum_track = MusicProcessor.create_drum_track(tempo, 8)  # Create 8 bars of drums
+            # Create drum track with the specified style
+            from utils.midi_utils import create_drum_pattern
+            drum_track = create_drum_pattern(tempo, 8, drum_style)  # Create 8 bars of drums with the specified style
             mid.tracks.append(drum_track)
             
             # Create a song directory structure
             if not os.path.exists(SONGS_DIR):
                 os.makedirs(SONGS_DIR)
             
-            safe_title = "".join([c for c in title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
+            # Normalize title to ensure it's compatible with Latin-1 encoding (used by MIDI)
+            normalized_title = title.encode('ascii', 'ignore').decode('ascii')
+            safe_title = "".join([c for c in normalized_title if c.isalpha() or c.isdigit() or c==' ']).rstrip()
             if not safe_title:
                 safe_title = "song"
                 
@@ -180,10 +197,11 @@ class MusicProcessor:
             
             # Also save a song info JSON file with metadata
             song_info = {
-                "title": title,
+                "title": title,  # Keep the original title with special characters in JSON
                 "tempo": tempo,
                 "creation_date": datetime.now().isoformat(),
                 "chords": chords,
+                "drum_style": drum_style,
                 "melody_info": {
                     "verse_notes": len(melody.get("verse", [])),
                     "chorus_notes": len(melody.get("chorus", []))
@@ -198,72 +216,3 @@ class MusicProcessor:
         except Exception as e:
             logger.error(f"Error generating MIDI file: {str(e)}")
             raise HTTPException(status_code=500, detail=f"MIDI generation error: {str(e)}")
-
-    @staticmethod
-    def create_drum_track(tempo=DEFAULT_TEMPO, bars=8):
-        """Create a drum track with the specified number of bars"""
-        drum_track = MidiTrack()
-        drum_track.append(mido.MetaMessage('track_name', name='Drums', time=0))
-        drum_track.append(Message('program_change', program=0, channel=9, time=0))  # Drums channel
-
-        # Define drum notes (General MIDI drum map)
-        kick_drum = 36      # Bass Drum 1
-        snare_drum = 38     # Acoustic Snare
-        closed_hihat = 42   # Closed Hi-Hat
-
-        # Define time values (in ticks)
-        quarter = TICKS_PER_BEAT
-        eighth = quarter // 2
-        sixteenth = quarter // 4
-        note_duration = 40  # Short duration for percussion sounds
-
-        # Define velocities for dynamic feel
-        kick_velocity = 110
-        snare_velocity = 100
-        hihat_velocity = 90
-
-        # Pattern for measures in the song structure
-        def add_measure(track):
-            """Add one measure of the drum pattern: kick, hihat, snare, hihat, hihat, kick, snare, hihat"""
-            
-            # 1: Kick
-            track.append(Message('note_on', note=kick_drum, velocity=kick_velocity, channel=9, time=0))
-            track.append(Message('note_off', note=kick_drum, velocity=0, channel=9, time=note_duration))
-            
-            # 2: Hi-hat
-            track.append(Message('note_on', note=closed_hihat, velocity=hihat_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=note_duration))
-            
-            # 3: Snare
-            track.append(Message('note_on', note=snare_drum, velocity=snare_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=snare_drum, velocity=0, channel=9, time=note_duration))
-            
-            # 4: Hi-hat
-            track.append(Message('note_on', note=closed_hihat, velocity=hihat_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=note_duration))
-            
-            # 5: Hi-hat
-            track.append(Message('note_on', note=closed_hihat, velocity=hihat_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=note_duration))
-            
-            # 6: Kick
-            track.append(Message('note_on', note=kick_drum, velocity=kick_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=kick_drum, velocity=0, channel=9, time=note_duration))
-            
-            # 7: Snare
-            track.append(Message('note_on', note=snare_drum, velocity=snare_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=snare_drum, velocity=0, channel=9, time=note_duration))
-            
-            # 8: Hi-hat
-            track.append(Message('note_on', note=closed_hihat, velocity=hihat_velocity, channel=9, time=eighth-note_duration))
-            track.append(Message('note_off', note=closed_hihat, velocity=0, channel=9, time=note_duration))
-
-        # Add the requested number of measures
-        for _ in range(bars):
-            add_measure(drum_track)
-
-        # Set tempo for the drum track
-        tempo_microseconds = mido.bpm2tempo(tempo)
-        drum_track.append(mido.MetaMessage('set_tempo', tempo=tempo_microseconds, time=0))
-        
-        return drum_track

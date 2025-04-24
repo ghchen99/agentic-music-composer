@@ -12,6 +12,7 @@ class SongRequest(BaseModel):
     inspirations: List[str]
     title: Optional[str] = None
     tempo: Optional[int] = 120  # Default tempo
+    drum_style: Optional[str] = None  # Optional drum style parameter
 
 class ChordProgressionRequest(BaseModel):
     description: str
@@ -55,5 +56,6 @@ class SongDetails(BaseModel):
     chords: Optional[Dict[str, List[str]]] = None
     lyrics: Optional[Dict[str, str]] = None
     melody_summary: Optional[Dict[str, int]] = None
+    drum_style: Optional[str] = None  # Added drum style field
     midi_file: Optional[str] = None
     creation_date: Optional[str] = None

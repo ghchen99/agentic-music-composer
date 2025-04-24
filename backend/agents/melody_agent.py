@@ -25,9 +25,22 @@ def generate_melody(description: str, inspirations: List[str], chords: Dict[str,
         system_message = """You are a melody composer specializing in songwriting. 
         You'll create a melody for verse and chorus lyrics based on chord progressions.
         Focus on assigning notes and durations to each syllable of the lyrics in 4/4 time.
+        
+        YOUR RESPONSE MUST BE VALID JSON in this exact format:
+        {
+          "verse": [
+            {"pitch": "C4", "duration": 1.0, "syllable": "first"},
+            {"pitch": "D4", "duration": 0.5, "syllable": "sec"},
+            {"pitch": "E4", "duration": 0.5, "syllable": "ond"}
+          ],
+          "chorus": [
+            {"pitch": "G4", "duration": 1.0, "syllable": "cho"},
+            {"pitch": "F4", "duration": 1.0, "syllable": "rus"}
+          ]
+        }
+        
         For each syllable, specify a pitch (e.g., C4, D4, E4) and a duration (in quarter notes).
-        Your response should be in JSON format with 'verse' and 'chorus' keys, each containing an array of note objects.
-        Each note object should have 'pitch', 'duration', and 'syllable' keys."""
+        DO NOT include any explanation or additional text in your response, ONLY the JSON."""
         
         # Prepare messages for the LLM
         inspirations_str = ", ".join(inspirations)
@@ -51,97 +64,42 @@ def generate_melody(description: str, inspirations: List[str], chords: Dict[str,
         # Generate melody
         melody_response = ai_client.generate_chat_completion(
             messages=messages,
-            max_tokens=1500,
+            max_tokens=4000,
             temperature=0.7
         )
         
-        # Extract JSON from the response
-        json_match = re.search(r'({.*})', melody_response.replace('\n', ' '), re.DOTALL)
-        
-        melody = {
-            "verse": [],
-            "chorus": []
-        }
-        
-        if json_match:
-            try:
-                melody_json = json_match.group(1)
-                melody_data = json.loads(melody_json)
-                melody = melody_data
-            except json.JSONDecodeError:
-                logger.warning("JSON decode error, using manual extraction")
-                # Continue to manual extraction
-        
-        # If JSON parsing failed or didn't get expected structure, try manual extraction
-        if not melody.get("verse") and not melody.get("chorus"):
-            logger.warning("Using manual extraction for melody")
+        # Try to load the JSON directly
+        try:
+            melody = json.loads(melody_response)
+            logger.info("Successfully parsed melody JSON")
+        except json.JSONDecodeError:
+            # If direct parsing fails, try to extract JSON from the response
+            logger.warning("Direct JSON parse failed, trying to extract JSON object")
+            json_match = re.search(r'({.*})', melody_response.replace('\n', ' '), re.DOTALL)
             
-            # Look for verse notes
-            verse_section = re.search(r'verse"?\s*:\s*\[(.*?)\]', melody_response, re.DOTALL)
-            if verse_section:
-                verse_notes_str = verse_section.group(1)
-                
-                # Extract individual note objects
-                note_pattern = r'{(.*?)}'
-                note_matches = re.finditer(note_pattern, verse_notes_str)
-                
-                for note_match in note_matches:
-                    note_str = note_match.group(1)
-                    
-                    # Extract pitch, duration, and syllable
-                    pitch_match = re.search(r'pitch"?\s*:\s*"?([A-G][#b]?[0-9])"?', note_str)
-                    duration_match = re.search(r'duration"?\s*:\s*([0-9.]+)', note_str)
-                    syllable_match = re.search(r'syllable"?\s*:\s*"([^"]*)"', note_str)
-                    
-                    if pitch_match and duration_match:
-                        pitch = pitch_match.group(1)
-                        duration = float(duration_match.group(1))
-                        syllable = syllable_match.group(1) if syllable_match else ""
-                        
-                        melody["verse"].append({
-                            "pitch": pitch,
-                            "duration": duration,
-                            "syllable": syllable
-                        })
-            
-            # Look for chorus notes
-            chorus_section = re.search(r'chorus"?\s*:\s*\[(.*?)\]', melody_response, re.DOTALL)
-            if chorus_section:
-                chorus_notes_str = chorus_section.group(1)
-                
-                # Extract individual note objects
-                note_pattern = r'{(.*?)}'
-                note_matches = re.finditer(note_pattern, chorus_notes_str)
-                
-                for note_match in note_matches:
-                    note_str = note_match.group(1)
-                    
-                    # Extract pitch, duration, and syllable
-                    pitch_match = re.search(r'pitch"?\s*:\s*"?([A-G][#b]?[0-9])"?', note_str)
-                    duration_match = re.search(r'duration"?\s*:\s*([0-9.]+)', note_str)
-                    syllable_match = re.search(r'syllable"?\s*:\s*"([^"]*)"', note_str)
-                    
-                    if pitch_match and duration_match:
-                        pitch = pitch_match.group(1)
-                        duration = float(duration_match.group(1))
-                        syllable = syllable_match.group(1) if syllable_match else ""
-                        
-                        melody["chorus"].append({
-                            "pitch": pitch,
-                            "duration": duration,
-                            "syllable": syllable
-                        })
+            if json_match:
+                try:
+                    melody_json = json_match.group(1)
+                    melody = json.loads(melody_json)
+                    logger.info("Successfully extracted and parsed melody JSON")
+                except json.JSONDecodeError:
+                    logger.warning("JSON extraction failed, using default melody")
+                    melody = None
+            else:
+                logger.warning("No JSON found in response, using default melody")
+                melody = None
         
-        # If still empty, create a simple default melody
-        if not melody.get("verse"):
+        # If still empty, create a default melody
+        if not melody or not isinstance(melody, dict) or "verse" not in melody or "chorus" not in melody:
+            logger.warning("Using default melody generation")
             # Create a simple default melody
             verse_syllables = syllabify(lyrics.get("verse", "Default verse lyrics"))
-            melody["verse"] = generate_default_melody(verse_syllables, chords.get("verse", ["C", "G", "Am", "F"]))
-        
-        if not melody.get("chorus"):
-            # Create a simple default melody
             chorus_syllables = syllabify(lyrics.get("chorus", "Default chorus lyrics"))
-            melody["chorus"] = generate_default_melody(chorus_syllables, chords.get("chorus", ["F", "C", "G", "Am"]))
+            
+            melody = {
+                "verse": generate_default_melody(verse_syllables, chords.get("verse", ["C", "G", "Am", "F"])),
+                "chorus": generate_default_melody(chorus_syllables, chords.get("chorus", ["F", "C", "G", "Am"]))
+            }
         
         return {
             "melody": melody,

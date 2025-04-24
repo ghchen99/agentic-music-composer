@@ -54,7 +54,8 @@ async def create_song(request: SongRequest):
         description=request.description,
         inspirations=request.inspirations,
         title=request.title,
-        tempo=request.tempo or 120
+        tempo=request.tempo or 120,
+        drum_style=request.drum_style
     )
 
 @app.post("/api/generate-chords", response_model=Response)
