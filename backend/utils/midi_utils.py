@@ -82,42 +82,51 @@ def create_drum_pattern(tempo: int = 120, bars: int = 8, style: str = "basic") -
     # Get the pattern for a single bar
     single_bar_events = pattern_function(ticks_per_bar)
     
+    # Sort the events by tick position to ensure proper sequencing
+    single_bar_events = sorted(single_bar_events, key=lambda x: x[0])
+    
     # Create the drum track for the specified number of bars
     for bar in range(bars):
+        # For each bar, we'll track the absolute tick position within the MIDI file
+        absolute_tick = bar * ticks_per_bar
+        
+        # For each new bar, we need to reset the "last event time" for proper MIDI timing
+        last_event_time = 0
+        
         # Add a crash cymbal on the first beat of the first bar
         if bar == 0:
             drum_track.append(Message('note_on', note=DRUM_NOTES["crash"], velocity=VELOCITIES["accent"], channel=9, time=0))
-            drum_track.append(Message('note_off', note=DRUM_NOTES["crash"], velocity=0, channel=9, time=50))
+            # Short duration for crash - we don't want to delay other notes
+            drum_track.append(Message('note_off', note=DRUM_NOTES["crash"], velocity=0, channel=9, time=10))
+            last_event_time = 10  # Update last_event_time for proper sequencing
+        
+        # Process all events in the pattern
+        for event_idx, (tick, note, velocity, duration) in enumerate(single_bar_events):
+            # Calculate absolute tick position for this event
+            event_absolute_tick = absolute_tick + tick
             
-            # Adjust the first note's timing to account for the crash
-            if single_bar_events and single_bar_events[0][0] == 0:
-                # Skip the time offset for the first note since we just played the crash
-                _, note, vel, duration = single_bar_events[0]
-                drum_track.append(Message('note_on', note=note, velocity=vel, channel=9, time=0))
-                drum_track.append(Message('note_off', note=note, velocity=0, channel=9, time=duration))
-                events_to_process = single_bar_events[1:]
+            # Calculate the time parameter (delta time since last event)
+            if event_idx == 0 and bar == 0:
+                # For the first note of the first bar, time is relative to the crash cymbal
+                time_param = max(0, tick - last_event_time)
             else:
-                events_to_process = single_bar_events
-        else:
-            events_to_process = single_bar_events
+                # Calculate delta time from the last event
+                time_param = tick - last_event_time if tick > last_event_time else 0
             
-        # Add the rest of the pattern for this bar
-        last_tick = 0
-        for tick, note, velocity, duration in events_to_process:
-            # Calculate the time parameter (difference from last event)
-            time_param = tick - last_tick if tick > last_tick else 0
-            last_tick = tick
-            
-            # Add the note
+            # Add the note_on event
             drum_track.append(Message('note_on', note=note, velocity=velocity, channel=9, time=time_param))
+            
+            # Add the note_off event with the specified duration
             drum_track.append(Message('note_off', note=note, velocity=0, channel=9, time=duration))
-            last_tick += duration
+            
+            # Update the timing tracker - note that we've now advanced to tick + duration
+            last_event_time = tick + duration
         
         # Make sure we end exactly at the bar boundary
         if bar < bars - 1:  # Don't add extra time after the last bar
-            remaining_time = ticks_per_bar - last_tick
+            remaining_time = ticks_per_bar - last_event_time
             if remaining_time > 0:
-                # Add a silent note (or use mido.sleep) to complete the bar
+                # Add a silent note to complete the bar
                 drum_track.append(Message('note_on', note=DRUM_NOTES["kick"], velocity=0, channel=9, time=remaining_time))
                 drum_track.append(Message('note_off', note=DRUM_NOTES["kick"], velocity=0, channel=9, time=0))
     
