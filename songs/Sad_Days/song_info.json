@@ -1,25 +1,25 @@
 {
-  "title": "Happy Days",
+  "title": "Sad Days",
   "tempo": 120,
-  "creation_date": "2025-04-24T20:56:44.732337",
+  "creation_date": "2025-04-24T21:05:00.681559",
   "chords": {
     "verse": [
+      "Em",
       "C",
       "G",
-      "Am",
-      "F"
+      "D"
     ],
     "chorus": [
-      "F",
       "C",
       "G",
-      "Am"
+      "D",
+      "Em"
     ]
   },
   "drum_style": "basic",
   "structure": "16-bar cycle (8-bar verse, 8-bar chorus)",
   "melody_info": {
-    "verse_notes": 31,
+    "verse_notes": 32,
     "chorus_notes": 32
   }
 }
