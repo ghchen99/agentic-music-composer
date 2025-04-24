@@ -1,0 +1,25 @@
+{
+  "title": "Happy Days",
+  "tempo": 120,
+  "creation_date": "2025-04-24T20:56:44.732337",
+  "chords": {
+    "verse": [
+      "C",
+      "G",
+      "Am",
+      "F"
+    ],
+    "chorus": [
+      "F",
+      "C",
+      "G",
+      "Am"
+    ]
+  },
+  "drum_style": "basic",
+  "structure": "16-bar cycle (8-bar verse, 8-bar chorus)",
+  "melody_info": {
+    "verse_notes": 31,
+    "chorus_notes": 32
+  }
+}

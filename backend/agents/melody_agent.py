@@ -23,7 +23,6 @@ def generate_melody(description: str, inspirations: List[str], chords: Dict[str,
     try:
         # Prepare system message for melody generation
         system_message = """You are a melody composer for a 16-bar song (verse and chorus).
-
         STRUCTURE:
         - Verse: (4 chords repeats twice, 8 bars total)
         - Chorus: (4 chords repeats twice, 8 bars total)
@@ -41,9 +40,7 @@ def generate_melody(description: str, inspirations: List[str], chords: Dict[str,
         - Land on chord tones on strong beats
         - Non-chord tones must resolve smoothly
 
-        IMPORTANT: Return ONLY raw JSON with no markdown formatting, code blocks, or explanation.
-        Your response must be a valid JSON object with the following format:
-
+        IMPORTANT: Return ONLY raw JSON with this exact structure:
         {
         "verse": [
             {"pitch": "C4", "duration": 0.5, "syllable": "first"},
@@ -58,10 +55,13 @@ def generate_melody(description: str, inspirations: List[str], chords: Dict[str,
         ]
         }
 
-        IMPORTANT: 
+        CRITICAL RULES:
         - Each 2-bar phrase must sum to exactly 2.0 in duration
         - For rests, always use the string "rest" (lowercase) as the pitch value
-        - Empty syllables for rests should have an empty string"""
+        - Empty syllables for rests should have an empty string
+        - Include EVERY syllable from the provided lyrics
+        - Double-check that your output is valid JSON before submitting
+        - Respond with NOTHING except the JSON object"""
         
         # Prepare messages for the LLM
         inspirations_str = ", ".join(inspirations)
