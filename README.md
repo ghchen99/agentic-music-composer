@@ -1,4 +1,4 @@
-# AI Songwriting System
+# AI Songwriting Assistant
 
 A comprehensive multi-agent AI system for creating original songs with chord progressions, lyrics, melodies, and instrumental arrangements.
 

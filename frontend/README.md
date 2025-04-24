@@ -1,4 +1,4 @@
-# Songwriting Assistant Frontend
+# AI Songwriting Assistant Frontend
 
 A modern web interface for creating and managing AI-generated songs, built with Next.js, Tailwind CSS, and ShadCN UI components.
 

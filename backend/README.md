@@ -1,4 +1,4 @@
-# AI Composer Backend
+# AI Songwriting Assistant Backend
 
 A powerful AI-powered songwriting assistant that uses multiple specialised agents to create complete songs, including chord progressions, lyrics, melodies, and instrumental arrangements.
 
